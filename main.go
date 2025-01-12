@@ -1,6 +1,10 @@
 package main
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"math/rand"
+)
 
 const (
 	OptionEndOfList      = 0 // used at end of all options (additional padding could occur after last option)
@@ -9,20 +13,14 @@ const (
 )
 
 const (
-	SendStateUnAck = iota
-	SendStateNext
-	SendStateWindow
-	SendStateUrgentPointer
-	SendStateSegSeqNumForLastWinUpdate
-	SendStateSegAckNumForLastWinUpdate
-	SendStateInitialSendSeqNum
-)
-
-const (
-	ReceiveStateNext = iota
-	ReceiveStateReceiveWin
-	ReceiveStateReceiveUrgentPointer
-	ReceiveStateInitialReceiveSeqNum
+	ControlBitMaskCongestionWindowReduced = 1 << 7
+	ControlBitMaskECNEcho                 = 1 << 6
+	ControlBitMaskUrgentPointer           = 1 << 5
+	ControlBitMaskAck                     = 1 << 4
+	ControlBitMaskPushFunction            = 1 << 3
+	ControlBitMaskReset                   = 1 << 2
+	ControlBitMaskSyn                     = 1 << 1
+	ControlBitMaskFin                     = 1
 )
 
 const (
@@ -63,6 +61,19 @@ type TransmissionControlBlock struct {
 	ReceiveBuffer, SendBuffer  []byte
 	RetransmitQueue            []byte
 	CurrentSegment             *TcpSegment
+
+	SendUnAck               bool
+	SendNext                bool
+	SendWindow              bool
+	SendUrgentPointer       bool
+	SendSeqNumLastWinUpdate uint32
+	SendAckNumLastWinUpdate uint32
+	SendInitialSendSeqNum   uint32
+
+	ReceiveNext                 bool
+	ReceiveWindow               bool
+	ReceiveUrgentPointer        bool
+	ReceiveInitialReceiveSeqNum uint32
 }
 
 type TcpHeader struct {
@@ -177,6 +188,68 @@ func generateStateActionResultTransitionMap() map[int]map[int]int {
 	return result
 }
 
-func main() {
+type TcpEndpoint struct {
+	tcb       TransmissionControlBlock
+	link      chan byte
+	terminate chan bool
+}
 
+func (endpoint *TcpEndpoint) Listen() {
+	for b := range endpoint.link {
+		fmt.Printf("Received byte %c\n", b)
+		if b == 'b' {
+			break
+		}
+	}
+
+	endpoint.terminate <- true
+}
+
+func (endpoint *TcpEndpoint) receive(segment TcpSegment) {
+	controlBits := segment.Header.controlBits
+	switch controlBits {
+	case ControlBitMaskCongestionWindowReduced:
+	case ControlBitMaskECNEcho:
+	case ControlBitMaskUrgentPointer:
+	case ControlBitMaskAck:
+		endpoint.processAck(segment)
+	case ControlBitMaskPushFunction:
+	case ControlBitMaskReset:
+	case ControlBitMaskSyn:
+	case ControlBitMaskFin:
+	}
+}
+
+func (endpoint *TcpEndpoint) processAck(segment TcpSegment) {
+
+}
+
+func (endpoint *TcpEndpoint) processRcv(segment TcpSegment) {
+
+}
+
+func (endpoint *TcpEndpoint) Send() {
+	for {
+		letter := byte(rand.Int()%26 + 'a')
+		endpoint.link <- letter
+		if letter == 'b' {
+			break
+		}
+	}
+
+	endpoint.terminate <- true
+}
+
+func main() {
+	link := make(chan byte, 1_000)
+	terminate := make(chan bool)
+	server := TcpEndpoint{link: link, terminate: terminate}
+	client := TcpEndpoint{link: link, terminate: terminate}
+
+	go server.Listen()
+	go client.Send()
+
+	<-terminate
+	<-terminate
+	fmt.Println("terminated")
 }
