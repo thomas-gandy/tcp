@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"time"
 )
 
 const (
@@ -190,23 +191,45 @@ func generateStateActionResultTransitionMap() map[int]map[int]int {
 }
 
 type TcpEndpoint struct {
-	tcb       TransmissionControlBlock
-	link      chan byte
-	terminate chan bool
+	tcb        TransmissionControlBlock
+	receive    <-chan byte
+	send       chan<- byte
+	terminate  chan bool
+	terminated chan bool
 }
 
 func (endpoint *TcpEndpoint) Listen() {
-	for b := range endpoint.link {
-		fmt.Printf("Received byte %c\n", b)
-		if b == 'b' {
-			break
+	shouldTerminate := false
+	for !shouldTerminate {
+		select {
+		case b := <-endpoint.receive:
+			fmt.Printf("Received byte %c\n", b)
+		case shouldTerminate = <-endpoint.terminate:
+			close(endpoint.send)
+			endpoint.terminated <- true
 		}
 	}
-
-	endpoint.terminate <- true
 }
 
-func (endpoint *TcpEndpoint) receive(segment TcpSegment, segmentLength uint16) {
+func (endpoint *TcpEndpoint) Send() {
+	shouldTerminate := false
+	for !shouldTerminate {
+		select {
+		case shouldTerminate = <-endpoint.terminate:
+			close(endpoint.send)
+			endpoint.terminated <- true
+		default:
+			letter := byte(rand.Int()%26 + 'a')
+			endpoint.send <- letter
+		}
+	}
+}
+
+func (endpoint *TcpEndpoint) Reset() {
+	endpoint.terminate, endpoint.terminated = make(chan bool), make(chan bool)
+}
+
+func (endpoint *TcpEndpoint) receiveSegment(segment TcpSegment, segmentLength uint16) {
 	controlBits := segment.Header.controlBits
 	var err error = nil
 	switch controlBits {
@@ -313,28 +336,50 @@ func (endpoint *TcpEndpoint) processRcv(segment TcpSegment, segmentLength uint16
 	return nil
 }
 
-func (endpoint *TcpEndpoint) Send() {
-	for {
-		letter := byte(rand.Int()%26 + 'a')
-		endpoint.link <- letter
-		if letter == 'b' {
-			break
-		}
+func makeTcpEndpoint() TcpEndpoint {
+	return TcpEndpoint{
+		terminate:  make(chan bool, 1),
+		terminated: make(chan bool),
 	}
+}
 
-	endpoint.terminate <- true
+type TcpConnection struct {
+	nodeA, nodeB *TcpEndpoint
+}
+
+func (connection TcpConnection) Terminate() {
+	a, b := connection.nodeA, connection.nodeB
+	a.terminate <- true
+	b.terminate <- true
+
+	<-a.terminated
+	<-b.terminated
+
+	b.send, b.send = nil, nil
+	a.receive, b.receive = nil, nil
+
+	a.Reset()
+	b.Reset()
+}
+
+func makeTcpConnection(a, b *TcpEndpoint) TcpConnection {
+	abLink, baLink := make(chan byte, 100), make(chan byte, 100)
+	a.send, b.receive = abLink, abLink
+	b.send, a.receive = baLink, baLink
+
+	return TcpConnection{nodeA: a, nodeB: b}
 }
 
 func main() {
-	link := make(chan byte, 1_000)
-	terminate := make(chan bool)
-	server := TcpEndpoint{link: link, terminate: terminate}
-	client := TcpEndpoint{link: link, terminate: terminate}
+	server := makeTcpEndpoint()
+	client := makeTcpEndpoint()
+	connection := makeTcpConnection(&client, &server)
 
 	go server.Listen()
 	go client.Send()
 
-	<-terminate
-	<-terminate
+	time.Sleep(2 * time.Second)
+	connection.Terminate()
+
 	fmt.Println("terminated")
 }
