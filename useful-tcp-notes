@@ -1,0 +1,9 @@
+Useful notes from the RFC document
+
+
+Note that when the receive window is zero no segments should be acceptable except ACK
+segments. Thus, it is possible for a TCP implementation to maintain a zero receive window while
+MUST
+transmitting data and receiving ACKs. A TCP receiver process the RST and URG fields of all
+incoming segments, even when the receive window is zero (MUST-66).
+
