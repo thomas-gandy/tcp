@@ -59,19 +59,19 @@ type TransmissionControlBlock struct {
 	LocalIP, DestinationIP     uint32
 	LocalPort, DestinationPort uint16
 	ReceiveBuffer, SendBuffer  []byte
-	RetransmitQueue            []byte
+	RetransmissionQueue        []*TcpSegment
 	CurrentSegment             *TcpSegment
 
-	SendUnAck               bool
-	SendNext                bool
+	SendUnAck               uint32
+	SendNext                uint32
 	SendWindow              bool
 	SendUrgentPointer       bool
 	SendSeqNumLastWinUpdate uint32
 	SendAckNumLastWinUpdate uint32
 	SendInitialSendSeqNum   uint32
 
-	ReceiveNext                 bool
-	ReceiveWindow               bool
+	ReceiveNext                 uint32
+	ReceiveWindow               uint32
 	ReceiveUrgentPointer        bool
 	ReceiveInitialReceiveSeqNum uint32
 }
@@ -86,7 +86,8 @@ type TcpHeader struct {
 	seqNumber, ackNumber uint32
 
 	/*
-		Number of 32 bit (4 byte) words in header; first four bits are data offset, the rest are reserved.
+		Number of 32 bit (4 byte) words in header.
+		The first four bits are the actual data offset, the rest are reserved.
 		Number of bytes in header up to (excluding) options is 20, so offset to final word would be 0101 (5).
 		If dataOffset > 5, then options are present and is (dataOffset - 5) * 4 bytes long.
 	*/
@@ -125,19 +126,19 @@ type StateMachine struct {
 	CurrentState int
 }
 
-func (machine *StateMachine) Transition(action int) (int, error) {
+func (machine *StateMachine) Transition(action int) error {
 	availableActionMap, ok := stateTransitionTable[machine.CurrentState]
 	if !ok {
-		return 0, errors.New("unknown state")
+		return errors.New("unknown state")
 	}
 
 	newState, ok := availableActionMap[action]
 	if !ok {
-		return 0, errors.New("no action defined for the current state")
+		return errors.New("no action defined for the current state")
 	}
 
 	machine.CurrentState = newState
-	return newState, nil
+	return nil
 }
 
 func generateStateActionResultTransitionMap() map[int]map[int]int {
@@ -205,27 +206,111 @@ func (endpoint *TcpEndpoint) Listen() {
 	endpoint.terminate <- true
 }
 
-func (endpoint *TcpEndpoint) receive(segment TcpSegment) {
+func (endpoint *TcpEndpoint) receive(segment TcpSegment, segmentLength uint16) {
 	controlBits := segment.Header.controlBits
+	var err error = nil
 	switch controlBits {
 	case ControlBitMaskCongestionWindowReduced:
 	case ControlBitMaskECNEcho:
 	case ControlBitMaskUrgentPointer:
 	case ControlBitMaskAck:
-		endpoint.processAck(segment)
+		err = endpoint.processAck(segment)
 	case ControlBitMaskPushFunction:
 	case ControlBitMaskReset:
 	case ControlBitMaskSyn:
+		err = endpoint.processRcv(segment, segmentLength)
 	case ControlBitMaskFin:
+	}
+
+	if err != nil {
+		panic("error occurred when receiving segment")
 	}
 }
 
-func (endpoint *TcpEndpoint) processAck(segment TcpSegment) {
+/*
+After an endpoint has sent a segment, it should receive an ACK in response.  This ACK must be validated.
+The incoming segment header's ACK num must lie in the range of the TCB's send (UnAck, Next].
+This is because the ACK num represents the sequence num which the receiver expects to receive next.
+Modulo arithmetic must be handled with care as the unsigned sequence num wraps to 0 upon reaching 2^32.
 
+(U)NACK   (A)CK    (N)EXT; six different letter combinations
+
++-----U------A-------N------+
++-----N------U-------A------+
++-----A------N-------U------+
+
+The above shows the different positions the numbers can lie at due to modulo wrap.
+*/
+func (endpoint *TcpEndpoint) processAck(segment TcpSegment) error {
+	sendUnAck := endpoint.tcb.SendUnAck
+	ackNum := segment.Header.ackNumber
+	sendNext := endpoint.tcb.SendNext
+
+	if sendUnAck < sendNext {
+		if ackNum <= sendUnAck {
+			return errors.New("send unack seq num is before the window")
+		}
+		if ackNum > sendNext {
+			return errors.New("send unack seq num is after the window")
+		}
+	} else if ackNum > sendNext && ackNum <= sendUnAck {
+		return errors.New("send unack seq num is outside the window")
+	}
+
+	return nil
 }
 
-func (endpoint *TcpEndpoint) processRcv(segment TcpSegment) {
+/*
+An endpoint can receive a TCP segment.  This segment should be validated.
 
+Rcv.Next (N)   Seg.Seq (S)   Seg.Seq + Seg.Len (S+L)   Rcv.Next + Rcv.Win (N+W)
+
++----N-----------S-------------------S+L-----------------------N+W  VALID
++----S-----------N-------------------S+L-----------------------N+W  VALID
++----N-----------S-------------------N+W-----------------------S+L  VALID
++----S-----------S+L-------------------N-----------------------N+W  INVALID (no seq num overlap with rcv window)
+*/
+func (endpoint *TcpEndpoint) processRcv(segment TcpSegment, segmentLength uint16) error {
+	receiveNext := endpoint.tcb.ReceiveNext
+	receiveWindow := endpoint.tcb.ReceiveWindow
+	segmentSeqNum := segment.Header.seqNumber
+
+	rl := endpoint.tcb.ReceiveNext
+	rr := rl + receiveWindow - 1
+	sl := segment.Header.seqNumber
+	sr := sl + uint32(segmentLength)
+
+	if segmentLength == 0 {
+		if receiveWindow == 0 && segmentSeqNum != receiveNext {
+			return errors.New("0 seg.len and rcv.win, but seg.seqNum != rcv.next")
+		}
+		if receiveWindow > 0 {
+			if rl < rr {
+				if sl < rl || sl >= rr {
+					return errors.New("seg.len == 0 && rcv.win > 0, but seg.seq outside of window")
+				}
+			} else {
+				if sl >= rr && sl < rl {
+					return errors.New("seg.len == 0 && rcv.win > 0, but seg.seq outside of window")
+				}
+			}
+		}
+	} else if receiveWindow == 0 {
+		return errors.New("segment length should not be > 0 when receive window is 0")
+	} else if rl < rr {
+		if sl < rl && sr < rl {
+			return errors.New("segment sequence window is before receive next window")
+		}
+		if sl >= rr && sr >= rr {
+			return errors.New("segment sequence window is after receive next window")
+		}
+	} else {
+		if sl >= rr && sl < rl && sr >= rr && sr < rl {
+			return errors.New("segment sequence window is outside receive next window")
+		}
+	}
+
+	return nil
 }
 
 func (endpoint *TcpEndpoint) Send() {
