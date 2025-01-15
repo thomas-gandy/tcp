@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -78,44 +80,44 @@ type TransmissionControlBlock struct {
 }
 
 type TcpHeader struct {
-	sourcePort, destinationPort uint16
+	SourcePort, DestinationPort uint16
 
 	/*
 		Sequence number of first octet (byte) in segment, or initial sequence number when SYN bit set
 		Expected next sequence number for sender to receive when ACK bit set
 	*/
-	seqNumber, ackNumber uint32
+	SeqNumber, AckNumber uint32
 
 	/*
 		Number of 32 bit (4 byte) words in header.
 		The first four bits are the actual data offset, the rest are reserved.
 		Number of bytes in header up to (excluding) options is 20, so offset to final word would be 0101 (5).
-		If dataOffset > 5, then options are present and is (dataOffset - 5) * 4 bytes long.
+		If DataOffset > 5, then options are present and is (DataOffset - 5) * 4 bytes long.
 	*/
-	dataOffset  uint8
-	controlBits uint8
+	DataOffset  uint8
+	ControlBits uint8
 
 	/*
 		Number of bytes (starting with first ACK byte) the sender is willing to receive.
 	*/
-	window uint16
+	Window uint16
 
 	/*
 		16-bit ones' complement of ones' complement sum of all 16-bit words in header and text.
 		If segment has odd number of bytes, can pad last byte with zeroed byte.
 		Pseudo header (for IPv4 xor IPv6) used to make checksum but not actually sent with segment.
 	*/
-	checksum      uint16
-	urgentPointer uint16
+	Checksum      uint16
+	UrgentPointer uint16
 
 	/*
-		Multiple of 8-bits (1 byte), with its byte size calculated via (dataOffset - 5) * 4 (may have 3 byte padding).
+		Multiple of 8-bits (1 byte), with its byte size calculated via (DataOffset - 5) * 4 (may have 3 byte padding).
 		An option can be a single byte which represents a kind of option (like a flag).
 		Or an option can be a byte for its option-kind followed by a byte representing option-length, followed by data.
 		This is like it stating a function, its arguments, and the length of its arguments.
 		The option-length includes the option-kind and option-length bytes.
 	*/
-	options []int8
+	Options []int8
 }
 
 type TcpSegment struct {
@@ -198,6 +200,53 @@ type TcpEndpoint struct {
 	terminated chan bool
 }
 
+func (endpoint *TcpEndpoint) sendSegment(segment *TcpSegment) error {
+	buffer := bytes.Buffer{}
+	encoder := gob.NewEncoder(&buffer)
+
+	err := encoder.Encode(segment)
+	if err != nil {
+		return errors.New("failed to encode segment to byte stream")
+	}
+
+	b, err := buffer.ReadByte()
+	for err == nil {
+		endpoint.send <- b
+		b, err = buffer.ReadByte()
+	}
+
+	return nil
+}
+
+func (endpoint *TcpEndpoint) receiveBytes() error {
+	bytes.NewBuffer([]byte{})
+	buffer := bytes.Buffer{}
+	for {
+		select {
+		case b := <-endpoint.receive:
+			buffer.Write([]byte{b})
+			if buffer.Available() == 0 {
+				_, err := assembleSegmentFromBytes(&buffer)
+				if err != nil {
+					return errors.New("failed to receive bytes: " + err.Error())
+				}
+			}
+		}
+	}
+}
+
+func assembleSegmentFromBytes(buffer *bytes.Buffer) (TcpSegment, error) {
+	var segment TcpSegment
+
+	decoder := gob.NewDecoder(buffer)
+	err := decoder.Decode(&segment)
+	if err != nil {
+		return TcpSegment{}, errors.New("failed to decode segment from buffer")
+	}
+
+	return segment, nil
+}
+
 func (endpoint *TcpEndpoint) Listen() {
 	shouldTerminate := false
 	for !shouldTerminate {
@@ -226,11 +275,11 @@ func (endpoint *TcpEndpoint) Send() {
 }
 
 func (endpoint *TcpEndpoint) Reset() {
-	endpoint.terminate, endpoint.terminated = make(chan bool), make(chan bool)
+	endpoint.terminate, endpoint.terminated = make(chan bool, 1), make(chan bool)
 }
 
 func (endpoint *TcpEndpoint) receiveSegment(segment TcpSegment, segmentLength uint16) {
-	controlBits := segment.Header.controlBits
+	controlBits := segment.Header.ControlBits
 	var err error = nil
 	switch controlBits {
 	case ControlBitMaskCongestionWindowReduced:
@@ -266,7 +315,7 @@ The above shows the different positions the numbers can lie at due to modulo wra
 */
 func (endpoint *TcpEndpoint) processAck(segment TcpSegment) error {
 	sendUnAck := endpoint.tcb.SendUnAck
-	ackNum := segment.Header.ackNumber
+	ackNum := segment.Header.AckNumber
 	sendNext := endpoint.tcb.SendNext
 
 	if sendUnAck < sendNext {
@@ -296,11 +345,11 @@ Rcv.Next (N)   Seg.Seq (S)   Seg.Seq + Seg.Len (S+L)   Rcv.Next + Rcv.Win (N+W)
 func (endpoint *TcpEndpoint) processRcv(segment TcpSegment, segmentLength uint16) error {
 	receiveNext := endpoint.tcb.ReceiveNext
 	receiveWindow := endpoint.tcb.ReceiveWindow
-	segmentSeqNum := segment.Header.seqNumber
+	segmentSeqNum := segment.Header.SeqNumber
 
 	rl := endpoint.tcb.ReceiveNext
 	rr := rl + receiveWindow - 1
-	sl := segment.Header.seqNumber
+	sl := segment.Header.SeqNumber
 	sr := sl + uint32(segmentLength)
 
 	if segmentLength == 0 {
@@ -336,8 +385,14 @@ func (endpoint *TcpEndpoint) processRcv(segment TcpSegment, segmentLength uint16
 	return nil
 }
 
-func makeTcpEndpoint() TcpEndpoint {
+func makeTcpEndpoint(port uint16) TcpEndpoint {
 	return TcpEndpoint{
+		tcb: TransmissionControlBlock{
+			LocalIP:         0,
+			DestinationIP:   0,
+			LocalPort:       port,
+			DestinationPort: 0,
+		},
 		terminate:  make(chan bool, 1),
 		terminated: make(chan bool),
 	}
@@ -371,8 +426,8 @@ func makeTcpConnection(a, b *TcpEndpoint) TcpConnection {
 }
 
 func main() {
-	server := makeTcpEndpoint()
-	client := makeTcpEndpoint()
+	server := makeTcpEndpoint(8050)
+	client := makeTcpEndpoint(8055)
 	connection := makeTcpConnection(&client, &server)
 
 	go server.Listen()
