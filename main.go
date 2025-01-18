@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
-	"encoding/gob"
 	"errors"
 	"fmt"
-	"math/rand"
 	"time"
 )
 
@@ -122,7 +119,7 @@ type TcpHeader struct {
 
 type TcpSegment struct {
 	Header TcpHeader
-	Data   []byte
+	Data   any
 }
 
 type StateMachine struct {
@@ -194,65 +191,18 @@ func generateStateActionResultTransitionMap() map[int]map[int]int {
 
 type TcpEndpoint struct {
 	tcb        TransmissionControlBlock
-	receive    <-chan byte
-	send       chan<- byte
+	receive    <-chan TcpSegment
+	send       chan<- TcpSegment
 	terminate  chan bool
 	terminated chan bool
-}
-
-func (endpoint *TcpEndpoint) sendSegment(segment *TcpSegment) error {
-	buffer := bytes.Buffer{}
-	encoder := gob.NewEncoder(&buffer)
-
-	err := encoder.Encode(segment)
-	if err != nil {
-		return errors.New("failed to encode segment to byte stream")
-	}
-
-	b, err := buffer.ReadByte()
-	for err == nil {
-		endpoint.send <- b
-		b, err = buffer.ReadByte()
-	}
-
-	return nil
-}
-
-func (endpoint *TcpEndpoint) receiveBytes() error {
-	bytes.NewBuffer([]byte{})
-	buffer := bytes.Buffer{}
-	for {
-		select {
-		case b := <-endpoint.receive:
-			buffer.Write([]byte{b})
-			if buffer.Available() == 0 {
-				_, err := assembleSegmentFromBytes(&buffer)
-				if err != nil {
-					return errors.New("failed to receive bytes: " + err.Error())
-				}
-			}
-		}
-	}
-}
-
-func assembleSegmentFromBytes(buffer *bytes.Buffer) (TcpSegment, error) {
-	var segment TcpSegment
-
-	decoder := gob.NewDecoder(buffer)
-	err := decoder.Decode(&segment)
-	if err != nil {
-		return TcpSegment{}, errors.New("failed to decode segment from buffer")
-	}
-
-	return segment, nil
 }
 
 func (endpoint *TcpEndpoint) Listen() {
 	shouldTerminate := false
 	for !shouldTerminate {
 		select {
-		case b := <-endpoint.receive:
-			fmt.Printf("Received byte %c\n", b)
+		case segment := <-endpoint.receive:
+			fmt.Printf("received segment %d\n", segment.Header.SeqNumber)
 		case shouldTerminate = <-endpoint.terminate:
 			close(endpoint.send)
 			endpoint.terminated <- true
@@ -260,18 +210,21 @@ func (endpoint *TcpEndpoint) Listen() {
 	}
 }
 
-func (endpoint *TcpEndpoint) Send() {
-	shouldTerminate := false
-	for !shouldTerminate {
-		select {
-		case shouldTerminate = <-endpoint.terminate:
-			close(endpoint.send)
-			endpoint.terminated <- true
-		default:
-			letter := byte(rand.Int()%26 + 'a')
-			endpoint.send <- letter
-		}
+func (endpoint *TcpEndpoint) Send(data any) {
+	header := TcpHeader{
+		SourcePort:      1,
+		DestinationPort: 2,
+		SeqNumber:       3,
+		AckNumber:       4,
+		DataOffset:      5,
+		ControlBits:     6,
+		Window:          7,
+		Checksum:        8,
+		UrgentPointer:   9,
+		Options:         nil,
 	}
+	segment := TcpSegment{Header: header, Data: data}
+	endpoint.send <- segment
 }
 
 func (endpoint *TcpEndpoint) Reset() {
@@ -418,7 +371,7 @@ func (connection TcpConnection) Terminate() {
 }
 
 func makeTcpConnection(a, b *TcpEndpoint) TcpConnection {
-	abLink, baLink := make(chan byte, 100), make(chan byte, 100)
+	abLink, baLink := make(chan TcpSegment, 100), make(chan TcpSegment, 100)
 	a.send, b.receive = abLink, abLink
 	b.send, a.receive = baLink, baLink
 
@@ -428,13 +381,11 @@ func makeTcpConnection(a, b *TcpEndpoint) TcpConnection {
 func main() {
 	server := makeTcpEndpoint(8050)
 	client := makeTcpEndpoint(8055)
-	connection := makeTcpConnection(&client, &server)
+	makeTcpConnection(&client, &server)
 
 	go server.Listen()
-	go client.Send()
+	go client.Send(1)
 
 	time.Sleep(2 * time.Second)
-	connection.Terminate()
-
 	fmt.Println("terminated")
 }
