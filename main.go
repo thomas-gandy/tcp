@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/big"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -14,14 +17,14 @@ const (
 )
 
 const (
-	ControlBitMaskCongestionWindowReduced = 1 << 7
-	ControlBitMaskECNEcho                 = 1 << 6
-	ControlBitMaskUrgentPointer           = 1 << 5
-	ControlBitMaskAck                     = 1 << 4
-	ControlBitMaskPushFunction            = 1 << 3
-	ControlBitMaskReset                   = 1 << 2
-	ControlBitMaskSyn                     = 1 << 1
-	ControlBitMaskFin                     = 1
+	ControlBitFlagCongestionWindowReduced = 1 << 7
+	ControlBitFlagECNEcho                 = 1 << 6
+	ControlBitFlagUrgentPointer           = 1 << 5
+	ControlBitFlagAck                     = 1 << 4
+	ControlBitFlagPushFunction            = 1 << 3
+	ControlBitFlagReset                   = 1 << 2
+	ControlBitFlagSyn                     = 1 << 1
+	ControlBitFlagFin                     = 1
 )
 
 type TransmissionControlBlock struct {
@@ -116,6 +119,7 @@ type TcpEndpoint struct {
 	send       chan<- TcpSegment
 	terminate  chan bool
 	terminated chan bool
+	ticker     *time.Ticker
 }
 
 func (endpoint *TcpEndpoint) Listen() {
@@ -129,6 +133,29 @@ func (endpoint *TcpEndpoint) Listen() {
 			endpoint.terminated <- true
 		}
 	}
+}
+
+// Connect establishes a connection to another TCP endpoint over a pre-established interface link
+// via a three-way handshake.
+func (endpoint *TcpEndpoint) Connect() {
+	segment := TcpSegment{
+		Header: TcpHeader{
+			SourcePort:      1,
+			DestinationPort: 2,
+			SeqNumber:       endpoint.generateInitialSequenceNumber(),
+			AckNumber:       4,
+			DataOffset:      5,
+			ControlBits:     ControlBitFlagSyn,
+			Window:          7,
+			Checksum:        8,
+			UrgentPointer:   9,
+			Options:         nil,
+		},
+	}
+
+	endpoint.send <- segment
+	//returnedAckSegment := <-endpoint.receive
+
 }
 
 func (endpoint *TcpEndpoint) Send(data any) {
@@ -152,20 +179,37 @@ func (endpoint *TcpEndpoint) Reset() {
 	endpoint.terminate, endpoint.terminated = make(chan bool, 1), make(chan bool)
 }
 
+func (endpoint *TcpEndpoint) generateInitialSequenceNumber() uint32 {
+	localIP := strconv.Itoa(int(endpoint.tcb.LocalIP))
+	destinationIP := strconv.Itoa(int(endpoint.tcb.DestinationIP))
+	localPort := strconv.Itoa(int(endpoint.tcb.LocalPort))
+	destinationPort := strconv.Itoa(int(endpoint.tcb.DestinationPort))
+	key := "secret key"
+
+	hashInput := localIP + destinationIP + localPort + destinationPort + key
+	hash := sha256.Sum256([]byte(hashInput))
+
+	hashInt := (&big.Int{}).SetBytes(hash[:])
+	clockInt := (&big.Int{}).SetInt64((<-endpoint.ticker.C).UnixMicro())
+	isn := (&big.Int{}).Add(hashInt, clockInt)
+
+	return uint32(isn.Uint64())
+}
+
 func (endpoint *TcpEndpoint) receiveSegment(segment TcpSegment, segmentLength uint16) {
 	controlBits := segment.Header.ControlBits
 	var err error = nil
 	switch controlBits {
-	case ControlBitMaskCongestionWindowReduced:
-	case ControlBitMaskECNEcho:
-	case ControlBitMaskUrgentPointer:
-	case ControlBitMaskAck:
-		err = endpoint.processAck(segment)
-	case ControlBitMaskPushFunction:
-	case ControlBitMaskReset:
-	case ControlBitMaskSyn:
-		err = endpoint.processRcv(segment, segmentLength)
-	case ControlBitMaskFin:
+	case ControlBitFlagCongestionWindowReduced:
+	case ControlBitFlagECNEcho:
+	case ControlBitFlagUrgentPointer:
+	case ControlBitFlagAck:
+		//err = endpoint.processAck(segment)
+	case ControlBitFlagPushFunction:
+	case ControlBitFlagReset:
+	case ControlBitFlagSyn:
+		//err = endpoint.processRcv(segment, segmentLength)
+	case ControlBitFlagFin:
 	}
 
 	if err != nil {
@@ -259,7 +303,7 @@ func (endpoint *TcpEndpoint) processRcv(segment TcpSegment, segmentLength uint16
 	return nil
 }
 
-func makeTcpEndpoint(port uint16) TcpEndpoint {
+func makeTcpEndpoint(port uint16, ticker *time.Ticker) TcpEndpoint {
 	return TcpEndpoint{
 		tcb: TransmissionControlBlock{
 			LocalIP:         0,
@@ -269,6 +313,7 @@ func makeTcpEndpoint(port uint16) TcpEndpoint {
 		},
 		terminate:  make(chan bool, 1),
 		terminated: make(chan bool),
+		ticker:     ticker,
 	}
 }
 
@@ -300,13 +345,15 @@ func makeTcpConnection(a, b *TcpEndpoint) TcpConnection {
 }
 
 func main() {
-	server := makeTcpEndpoint(8050)
-	client := makeTcpEndpoint(8055)
+	ticker := time.NewTicker(4 * time.Microsecond)
+	server := makeTcpEndpoint(8050, ticker)
+	client := makeTcpEndpoint(8055, ticker)
 	makeTcpConnection(&client, &server)
 
 	go server.Listen()
+	client.Connect()
 	go client.Send(1)
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 	fmt.Println("terminated")
 }

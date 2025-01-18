@@ -1,9 +1,74 @@
 Useful notes from the RFC document
 
+--- MY OWN NOTES ---
++ Initial sequence number (ISN) selection is important +
 
+If a local TCP endpoint is communicating with a remote endpoint but the local TCP endpoint is reused, existing
+segments from a prior session may still exist on the network.  This could occur to the endpoint if it is closed
+and then reopened, or the connection is lost but then is re-established.  It is important to be able to distinguish
+between segments that came from the same endpoint but before the endpoint was reused, and segments that came
+from the 'new' endpoint.  If you do not do this, a receiving endpoint may receive a segment that was from the
+original endpoint, then receive the new segment and discard it because it has already just received a segment
+with that sequence number so the sequence number is outside of its receive window.
+
+What really uniquely identifies an endpoint is its Transmission Control Block (TCB).  If a connection is closed
+and reopened, there is nothing in the TCB (like any sort of ID) that segments sent from the endpoint can use
+to uniquely identify itself as coming from that specific endpoint and that specific session instance.
+Instead, you have to be cautious to not send a segment from the 'new' endpoint that has the same sequence
+number as a different segment that still exists on the network.
+
+As a basic starting point for the ISN, the specification uses a monotonically increasing 32-bit clock value
+which roughly increments once every 4 microseconds.  It is assumed that the maximum segment lifetime (MSL) of
+a segment will expire before the sequence number wraps round.  However, it could become an issue if the sequence
+number wraps back around before a segment has expired.  This can occur if the network has a high data rate, where
+after the ISN has been selected, segments are transferred so quickly that a new segment to be sent ends up
+being assigned the same sequence number as one of the originals.
+
+To combat against possible use of sequence numbers that are still in use in the network, a different approach
+called the Timestamp Option can be employed.  It is important that incarnated connections have a unique ISN, but
+it is not necessary for different connections to have a unique ISN.
+
+To try and protect against sequence number attacks, you can generate ISNs with a function F, where the ISN
+can be generated via ISN = clock-value + F(sIP, sP, dIP, dp, secret-key).  An alternative is to just randomly
+generate an ISN when needed.  This alternative is less commonly used due to the potential of having to wait
+in the TIME-WAIT state each time a connection is reincarnated.  If you know your ISNs will follow a certain
+pattern (and guard against others from being able to know this pattern), you may not always need to wait in
+the TIME-WAIT state and can immediately begin a new connection incarnation.
+
+For a second, let's assume we are using the clock and not F.  If a connection is reincarnated and you know
+the sequence number the clock will generate is not going to still exist in the network, there is no need to
+go into the TIME-WAIT state.
+
+
+
+
+
+--- COPIED FROM THE RFC ---
 Note that when the receive window is zero no segments should be acceptable except ACK
 segments. Thus, it is possible for a TCP implementation to maintain a zero receive window while
 MUST
 transmitting data and receiving ACKs. A TCP receiver process the RST and URG fields of all
 incoming segments, even when the receive window is zero (MUST-66).
 
+
+
+
+-- MY QUESTIONS (PERHAPS SOME UNANSWERED) ---
+Q:
+One of the issues that sort of has to be solved with TCP is the potential reuse of sequence numbers that
+are already in use by old segments still on the network whose MSL has not yet expired.  This is because
+a new connection with the same IP address and port is considered to be an incarnation of a previous
+connection with that same source IP address and port.  Why can't an additional field be added into the
+TCP header that provides it with a unique identifier?
+
+A:
+I assume this is because you have to be able to recover from a potential complete loss of a connection
+where a restart with complete memory loss for a node is possible.  If you can't remember the unique
+identifier history, how are you supposed to be able to use it properly!?
+
+
+Q:
+What happens if a TCP segment has been sent on to the network but then both endpoints simultaneously
+and instantaneously go down and back up again.  How does that segment get handled?  Surely both nodes
+won't know to make use of the TIME-WAIT state?  Unless upon starting, no node is able to make ANY sort
+of connection until MSL or MSL*2 time has passed?
