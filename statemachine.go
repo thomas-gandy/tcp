@@ -32,6 +32,10 @@ const (
 
 var stateTransitionTable = generateStateActionResultTransitionMap()
 
+type StateMachine struct {
+	CurrentState int
+}
+
 func generateStateActionResultTransitionMap() map[int]map[int]int {
 	result := make(map[int]map[int]int, TotalStates)
 

@@ -36,8 +36,20 @@ pattern (and guard against others from being able to know this pattern), you may
 the TIME-WAIT state and can immediately begin a new connection incarnation.
 
 For a second, let's assume we are using the clock and not F.  If a connection is reincarnated and you know
-the sequence number the clock will generate is not going to still exist in the network, there is no need to
-go into the TIME-WAIT state.
+the sequence number the clock will generate is not going to still exist in the network, there may be no need
+to go into the TIME-WAIT state.  As per the RFC below...
+
+```
+Note that if a TCP endpoint is reinitialized in some sense, yet retains its
+memory of sequence numbers in use, then it need not wait at all; it must only be sure to use
+sequence numbers larger than those recently used.
+```
+
+This is the heuristic approach mentioned in RFC 6528, whereby a heuristic (best guess) approach can be taken
+to decide if you need to stay in the TIME-WAIT state or not.  If the ISN of the new incarnated connection
+is significantly higher than the old connection's ISN still in the TIME-WAIT state, such that it is
+significantly unlikely for an overlap to occur (but not impossible), then the new connection does not need
+to wait MSL time.
 
 
 

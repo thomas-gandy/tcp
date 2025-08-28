@@ -27,75 +27,93 @@ const (
 	ControlBitFlagFin                     = 1
 )
 
+// TransmissionControlBlock (TCB) holds a set of information about an active TCP connection.  The TCB should
+// be deleted upon a reset (RST) when in a state that carries out the reset.
 type TransmissionControlBlock struct {
 	LocalIP, DestinationIP     uint32
 	LocalPort, DestinationPort uint16
-	ReceiveBuffer, SendBuffer  []byte
-	RetransmissionQueue        []*TcpSegment
-	CurrentSegment             *TcpSegment
+	RetransmissionQueue        []*TcpSegment // Segments sent but not yet acknowledged
+	CurrentSegment             *TcpSegment   // The current segment being evaluated
 
-	SendUnAck               uint32
-	SendNext                uint32
-	SendWindow              bool
-	SendUrgentPointer       bool
+	SendBuffer []byte // For a sending endpoint; a buffer of data that will eventually be flushed out and sent
+	SendUnAck  uint32 // Oldest sequence number sent yet to be acknowledged
+	SendNext   uint32 // Sequence number to assign to next sent octet
+
+	// Number of sequence numbers starting from (including) SendUnAck that have been sent but not yet acknowledged
+	// up to (excluding) SendNext, and additionally the sequence numbers from (including) SendNext that have not
+	// yet been sent but are allowed to be sent (an error in 3.3.1 of the RFC describes this part incorrectly).
+	// It represents the sequence number the remote (receiving) endpoint is willing to receive, and takes its
+	// value from the SEG.WIN field in the segment header from the remote receiving endpoint.  From this, one could
+	// interpret that the SendWindow and ReceiveWindow will always be equivalent, but apparently this is not the case.
+	SendWindow        uint32
+	SendUrgentPointer uint16 // See TcpHeader; SendUrgentPointer applies to a sending endpoint
+
+	// AKA SND.WL1; segment's sequence number when the last window update occurred.
+	// Its value is set when a segment arrives in the following possible states:
+	//
+	// 1) StateSynSent
+	//	If there is no ACK in the segment but a SYN does exist, the endpoint should transition to StateSynReceived.
+	//	SND.WL1 should be set to SEG.SEQ and SND.WL2 should be set to SEG.ACK.
+	//	I am a bit confused on what happens in 3.10.7.3 if a received segment has neither SYN nor ACK flags set
+	//
+	// 2) StateSynReceived
+	//	If SEG.ACK represents a sequence number awaiting acknowledgement (i.e. SND.UNA < SEG.ACK =< SND.NXT), then
+	//	the state transitions to StateEstablished and SND.WL1 is set to SEG.SEQ and SND.WL2 is set to SEG.ACK.
+	//
+	// 3) StateEstablished
+	//		If
+	//
+	// when a segment arrives during StateSynSent and .
+	// Its value is also set to SEG.SEQ when a segment arrives during StateSynReceived
 	SendSeqNumLastWinUpdate uint32
-	SendAckNumLastWinUpdate uint32
-	SendInitialSendSeqNum   uint32
+	SendAckNumLastWinUpdate uint32 // AKA SND.WL2; segment's acknowledgement number when the last window update occurred
+	SendInitialSendSeqNum   uint32 // AKA ISS; initial sequence number (ISN) used by a sending endpoint.  Not updated.
 
-	ReceiveNext                 uint32
-	ReceiveWindow               uint32
-	ReceiveUrgentPointer        bool
-	ReceiveInitialReceiveSeqNum uint32
+	ReceiveBuffer []byte // For a receiving endpoint; a buffer of data that will eventually be flushed in and read
+	ReceiveNext   uint32 // expected next sequence number to receive
+
+	ReceiveWindow               uint32 // number of seq nums from (including) ReceiveNext allowed for new reception
+	ReceiveUrgentPointer        bool   // See TcpHeader; ReceiveUrgentPointer applies to a receiving endpoint
+	ReceiveInitialReceiveSeqNum uint32 // Holds the value of SEG.SEQ from an incoming SYN segment.  Not updated.
 }
 
 type TcpHeader struct {
 	SourcePort, DestinationPort uint16
 
-	/*
-		Sequence number of first octet (byte) in segment, or initial sequence number when SYN bit set
-		Expected next sequence number for sender to receive when ACK bit set
-	*/
+	// Sequence number of first octet (byte) in segment, or initial sequence number when SYN bit set
+	// Expected next sequence number for sender to receive when ACK bit set
 	SeqNumber, AckNumber uint32
 
-	/*
-		Number of 32 bit (4 byte) words in header.
-		The first four bits are the actual data offset, the rest are reserved.
-		Number of bytes in header up to (excluding) options is 20, so offset to final word would be 0101 (5).
-		If DataOffset > 5, then options are present and is (DataOffset - 5) * 4 bytes long.
-	*/
+	// Number of 32 bit (4 byte) words in header.
+	// The first four bits are the actual data offset, the rest are reserved.
+	// Number of bytes in header up to (excluding) options is 20, so offset to final word would be 0101 (5).
+	// If DataOffset > 5, then options are present and is (DataOffset - 5) * 4 bytes long.
 	DataOffset  uint8
 	ControlBits uint8
 
-	/*
-		Number of bytes (starting with first ACK byte) the sender is willing to receive.
-	*/
+	// Number of bytes (starting with first ACK byte) the sender of the segment is willing to receive in return.
 	Window uint16
 
-	/*
-		16-bit ones' complement of ones' complement sum of all 16-bit words in header and text.
-		If segment has odd number of bytes, can pad last byte with zeroed byte.
-		Pseudo header (for IPv4 xor IPv6) used to make checksum but not actually sent with segment.
-	*/
-	Checksum      uint16
+	// 16-bit ones' complement of ones' complement sum of all 16-bit words in header and text.
+	// If segment has odd number of bytes, can pad last byte with zeroed byte.
+	// Pseudo header (for IPv4 xor IPv6) used to make checksum but not actually sent with segment.
+	Checksum uint16
+
+	// Only used when URG bit set; its value is an offset from the sequence number in the segment.  When adding
+	// the urgent pointer to the current sequence number, you get the sequence number immediately after the data.
 	UrgentPointer uint16
 
-	/*
-		Multiple of 8-bits (1 byte), with its byte size calculated via (DataOffset - 5) * 4 (may have 3 byte padding).
-		An option can be a single byte which represents a kind of option (like a flag).
-		Or an option can be a byte for its option-kind followed by a byte representing option-length, followed by data.
-		This is like it stating a function, its arguments, and the length of its arguments.
-		The option-length includes the option-kind and option-length bytes.
-	*/
+	// Multiple of 8-bits (1 byte), with its byte size calculated via (DataOffset - 5) * 4 (may have 3 byte padding).
+	// An option can be a single byte which represents a kind of option (like a flag).
+	// Or an option can be a byte for its option-kind followed by a byte representing option-length, followed by data.
+	// This is like it stating a function, its arguments, and the length of its arguments.
+	// The option-length includes the option-kind and option-length bytes.
 	Options []int8
 }
 
 type TcpSegment struct {
 	Header TcpHeader
 	Data   any
-}
-
-type StateMachine struct {
-	CurrentState int
 }
 
 func (machine *StateMachine) Transition(action int) error {
@@ -122,12 +140,13 @@ type TcpEndpoint struct {
 	ticker     *time.Ticker
 }
 
-func (endpoint *TcpEndpoint) Listen() {
+func (endpoint *TcpEndpoint) PassiveOpen() {
 	shouldTerminate := false
 	for !shouldTerminate {
 		select {
 		case segment := <-endpoint.receive:
-			endpoint.receiveSegment(segment, uint16(unsafe.Sizeof(segment)))
+			// I think segment size is calculated from IP header (i.e. protocol above)
+			endpoint.handleSegment(segment, uint16(unsafe.Sizeof(segment)))
 		case shouldTerminate = <-endpoint.terminate:
 			close(endpoint.send)
 			endpoint.terminated <- true
@@ -135,27 +154,29 @@ func (endpoint *TcpEndpoint) Listen() {
 	}
 }
 
-// Connect establishes a connection to another TCP endpoint over a pre-established interface link
+// ActiveOpen establishes a connection to another TCP endpoint over a pre-established interface link
 // via a three-way handshake.
-func (endpoint *TcpEndpoint) Connect() {
+func (endpoint *TcpEndpoint) ActiveOpen() {
+	sequenceNumber := endpoint.generateInitialSequenceNumber()
+	endpoint.tcb.SendNext = sequenceNumber + 1
+
 	segment := TcpSegment{
 		Header: TcpHeader{
-			SourcePort:      1,
-			DestinationPort: 2,
-			SeqNumber:       endpoint.generateInitialSequenceNumber(),
-			AckNumber:       4,
-			DataOffset:      5,
+			SourcePort:      endpoint.tcb.LocalPort,
+			DestinationPort: endpoint.tcb.DestinationPort,
+			SeqNumber:       sequenceNumber,
+			AckNumber:       0, // unnecessary for initial syn
+			DataOffset:      0, // doesn't have to be used for initial syn
 			ControlBits:     ControlBitFlagSyn,
-			Window:          7,
-			Checksum:        8,
-			UrgentPointer:   9,
+			Window:          0,
+			Checksum:        0,
+			UrgentPointer:   0,
 			Options:         nil,
 		},
+		Data: "Active open segment",
 	}
 
 	endpoint.send <- segment
-	//returnedAckSegment := <-endpoint.receive
-
 }
 
 func (endpoint *TcpEndpoint) Send(data any) {
@@ -196,7 +217,9 @@ func (endpoint *TcpEndpoint) generateInitialSequenceNumber() uint32 {
 	return uint32(isn.Uint64())
 }
 
-func (endpoint *TcpEndpoint) receiveSegment(segment TcpSegment, segmentLength uint16) {
+func (endpoint *TcpEndpoint) handleSegment(segment TcpSegment, segmentLength uint16) {
+	fmt.Printf("received segment: %+v\n", segment)
+
 	controlBits := segment.Header.ControlBits
 	var err error = nil
 	switch controlBits {
@@ -204,11 +227,11 @@ func (endpoint *TcpEndpoint) receiveSegment(segment TcpSegment, segmentLength ui
 	case ControlBitFlagECNEcho:
 	case ControlBitFlagUrgentPointer:
 	case ControlBitFlagAck:
-		//err = endpoint.processAck(segment)
+		err = endpoint.processAck(segment)
 	case ControlBitFlagPushFunction:
 	case ControlBitFlagReset:
 	case ControlBitFlagSyn:
-		//err = endpoint.processRcv(segment, segmentLength)
+		err = endpoint.processReceivedSyn(segment, segmentLength)
 	case ControlBitFlagFin:
 	}
 
@@ -222,6 +245,7 @@ After an endpoint has sent a segment, it should receive an ACK in response.  Thi
 The incoming segment header's ACK num must lie in the range of the TCB's send (UnAck, Next].
 This is because the ACK num represents the sequence num which the receiver expects to receive next.
 Modulo arithmetic must be handled with care as the unsigned sequence num wraps to 0 upon reaching 2^32.
+UnAck represents the first (inclusive LHS) sequence number that has not yet been acknowledged.
 
 (U)NACK   (A)CK    (N)EXT; six different letter combinations
 
@@ -303,6 +327,11 @@ func (endpoint *TcpEndpoint) processRcv(segment TcpSegment, segmentLength uint16
 	return nil
 }
 
+func (endpoint *TcpEndpoint) processReceivedSyn(segment TcpSegment, segmentSize uint16) error {
+
+	return nil
+}
+
 func makeTcpEndpoint(port uint16, ticker *time.Ticker) TcpEndpoint {
 	return TcpEndpoint{
 		tcb: TransmissionControlBlock{
@@ -311,6 +340,8 @@ func makeTcpEndpoint(port uint16, ticker *time.Ticker) TcpEndpoint {
 			LocalPort:       port,
 			DestinationPort: 0,
 		},
+		send:       nil,
+		receive:    nil,
 		terminate:  make(chan bool, 1),
 		terminated: make(chan bool),
 		ticker:     ticker,
@@ -345,15 +376,26 @@ func makeTcpConnection(a, b *TcpEndpoint) TcpConnection {
 }
 
 func main() {
-	ticker := time.NewTicker(4 * time.Microsecond)
-	server := makeTcpEndpoint(8050, ticker)
-	client := makeTcpEndpoint(8055, ticker)
+	systemClock := time.NewTicker(4 * time.Microsecond)
+	server := makeTcpEndpoint(8050, systemClock)
+	client := makeTcpEndpoint(8055, systemClock)
+
+	// Links the node's channels but does not start reading or sending across those channels
 	makeTcpConnection(&client, &server)
 
-	go server.Listen()
-	client.Connect()
-	go client.Send(1)
+	// Make a node start reading off its read channel in the background
+	go server.PassiveOpen()
+	go client.PassiveOpen()
+
+	// Initialize for data sending
+	client.ActiveOpen()
+
+	// Send the actual data
+	go client.Send("client data sent to server")
+	go server.Send("server data sent to client")
+	go client.Send("more client data sent to server")
 
 	time.Sleep(3 * time.Second)
+	//connection.Terminate() unused for now until I figure out how best to terminate non-listening endpoints
 	fmt.Println("terminated")
 }
