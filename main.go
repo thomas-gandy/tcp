@@ -26,24 +26,28 @@ type Wire struct {
 	receive chan Datagram
 }
 
+type PhysicalInterface struct {
+	wire Wire
+}
+
 type Host struct {
-	MacAddress       string
-	GatewayInterface Wire
+	MacAddress        string
+	physicalInterface PhysicalInterface
 }
 
 func (host Host) listen() {
-	for datagram := range host.GatewayInterface.receive {
+	for datagram := range host.physicalInterface.wire.receive {
 		fmt.Println(datagram)
 	}
 }
 
 type Gateway struct {
-	interfaces map[string]Wire
+	interfaces map[string]PhysicalInterface
 }
 
 func (gateway Gateway) listen() {
 	for _, gatewayInterface := range gateway.interfaces {
-		for datagram := range gatewayInterface.receive {
+		for datagram := range gatewayInterface.wire.receive {
 			fmt.Println(datagram)
 		}
 	}
@@ -51,20 +55,20 @@ func (gateway Gateway) listen() {
 
 func (gateway *Gateway) connect(hosts ...*Host) {
 	for _, host := range hosts {
-		host.GatewayInterface = Wire{
+		host.physicalInterface.wire = Wire{
 			send:    make(chan Datagram),
 			receive: make(chan Datagram),
 		}
-		gateway.interfaces[host.MacAddress] = Wire{
-			send:    host.GatewayInterface.receive,
-			receive: host.GatewayInterface.send,
-		}
+		gateway.interfaces[host.MacAddress] = PhysicalInterface{Wire{
+			send:    host.physicalInterface.wire.receive,
+			receive: host.physicalInterface.wire.send,
+		}}
 	}
 }
 
 func main() {
 	hosts := []*Host{{MacAddress: "hostA"}, {MacAddress: "hostB"}}
-	gateway := Gateway{interfaces: make(map[string]Wire)}
+	gateway := Gateway{interfaces: make(map[string]PhysicalInterface)}
 	gateway.connect(hosts...)
 
 	for _, host := range hosts {
