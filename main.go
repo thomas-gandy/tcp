@@ -50,25 +50,17 @@ type PhysicalInterface struct {
 	receive    <-chan Datagram
 }
 
-// The IP module for a host
-type Host struct {
-	gatewayAddress     Address
+type Module struct {
 	physicalInterfaces map[string]*PhysicalInterface
 }
 
-func makeHost() Host {
-	return Host{
-		physicalInterfaces: make(map[string]*PhysicalInterface),
-	}
-}
-
-func (host Host) listen() error {
-	physicalInterface, ok := host.physicalInterfaces[eth0InterfaceName]
+func (module *Module) listen() error {
+	physicalInterface, ok := module.physicalInterfaces[eth0InterfaceName]
 	if !ok {
-		return errors.New("host cannot listen as interface uninitialised")
+		return errors.New("module cannot listen as interface uninitialised")
 	}
 	if physicalInterface.receive == nil {
-		return errors.New("host cannot listen as interface receive channel uninitialised")
+		return errors.New("module cannot listen as interface receive channel uninitialised")
 	}
 
 	for datagram := range physicalInterface.receive {
@@ -83,22 +75,38 @@ func (host Host) listen() error {
 	return nil
 }
 
+func (module *Module) send(d Datagram) {
+	module.physicalInterfaces[eth0InterfaceName].send <- d
+}
+
+// The IP module for a host
+type Host struct {
+	Module
+	gatewayAddress Address
+}
+
+func makeHost() Host {
+	return Host{
+		Module: Module{make(map[string]*PhysicalInterface)},
+	}
+}
+
 type Address = uint32
 
 // The IP module for a gateway
 type Gateway struct {
+	Module
 	address             Address
 	nextFreeHostAddress Address
 	connectedHosts      []Address
-	physicalInterfaces  map[string]*PhysicalInterface
 }
 
 func makeGateway() Gateway {
 	return Gateway{
+		Module:              Module{make(map[string]*PhysicalInterface)},
 		address:             0b0000_1000_0000_0001,
 		nextFreeHostAddress: 0b0000_1000_0000_0010,
 		connectedHosts:      make([]Address, 0, 64),
-		physicalInterfaces:  make(map[string]*PhysicalInterface),
 	}
 }
 
@@ -107,32 +115,6 @@ func (gateway *Gateway) reserveAddress() Address {
 	gateway.nextFreeHostAddress++
 
 	return address
-}
-
-func (gateway *Gateway) listen() error {
-	_, ok := gateway.physicalInterfaces[eth0InterfaceName]
-	if !ok {
-		return errors.New("gateway cannot listen as interface uninitialised")
-	}
-	gatewayInterface := gateway.physicalInterfaces[eth0InterfaceName]
-	if gatewayInterface.receive == nil {
-		return errors.New("gateway cannot listen as interface receive channel uninitialised")
-	}
-
-	for datagram := range gatewayInterface.receive {
-		fmt.Println(datagram)
-	}
-
-	// ensure send channel is also closed
-	gatewayInterface.connection.close()
-	gatewayInterface.connection = nil
-	gatewayInterface.send, gatewayInterface.receive = nil, nil
-
-	return nil
-}
-
-func (gateway *Gateway) send(d Datagram) {
-	gateway.physicalInterfaces[eth0InterfaceName].send <- d
 }
 
 // connect connects a gateway interface to an interface of a host.
@@ -186,7 +168,7 @@ func main() {
 
 	terminate := make(chan bool)
 	go func() {
-		time.Sleep(time.Second * 5)
+		time.Sleep(time.Second * 2)
 		gateway.disconnect(eth0InterfaceName)
 		terminate <- true
 	}()
