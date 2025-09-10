@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -30,13 +31,16 @@ type Datagram struct {
 
 // A multiplexed connection representing real-world physical transmission (e.g. wire or wireless)
 type Connection struct {
-	chanA chan Datagram
-	chanB chan Datagram
+	chanA      chan Datagram
+	chanB      chan Datagram
+	disconnect sync.Once
 }
 
-func (connection Connection) close() {
-	close(connection.chanA)
-	close(connection.chanB)
+func (connection *Connection) close() {
+	connection.disconnect.Do(func() {
+		close(connection.chanA)
+		close(connection.chanB)
+	})
 }
 
 type PhysicalInterface struct {
@@ -59,17 +63,22 @@ func makeHost() Host {
 }
 
 func (host Host) listen() error {
-	_, ok := host.physicalInterfaces[eth0InterfaceName]
+	physicalInterface, ok := host.physicalInterfaces[eth0InterfaceName]
 	if !ok {
 		return errors.New("host cannot listen as interface uninitialised")
 	}
-	if host.physicalInterfaces[eth0InterfaceName].receive == nil {
+	if physicalInterface.receive == nil {
 		return errors.New("host cannot listen as interface receive channel uninitialised")
 	}
 
-	for datagram := range host.physicalInterfaces[eth0InterfaceName].receive {
+	for datagram := range physicalInterface.receive {
 		fmt.Println(datagram)
 	}
+
+	// ensure send channel is also closed
+	physicalInterface.connection.close()
+	physicalInterface.connection = nil
+	physicalInterface.send, physicalInterface.receive = nil, nil
 
 	return nil
 }
@@ -114,9 +123,11 @@ func (gateway *Gateway) listen() error {
 		fmt.Println(datagram)
 	}
 
-	// At this point, the above loop would have terminated due to connection channel closure
-	// As the connection for the interface has been terminated, remove the interface
-	delete(gateway.physicalInterfaces, eth0InterfaceName)
+	// ensure send channel is also closed
+	gatewayInterface.connection.close()
+	gatewayInterface.connection = nil
+	gatewayInterface.send, gatewayInterface.receive = nil, nil
+
 	return nil
 }
 
