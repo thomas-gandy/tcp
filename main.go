@@ -31,52 +31,64 @@ type Datagram struct {
 
 // A multiplexed connection representing real-world physical transmission (e.g. wire or wireless)
 type Connection struct {
-	chanA      chan Datagram
-	chanB      chan Datagram
-	disconnect sync.Once
+	send    chan<- Datagram
+	receive <-chan Datagram
+	done    chan struct{} // use its close as a broadcast to signal the end of the connection
+	destroy sync.Once
 }
 
 func (connection *Connection) close() {
-	connection.disconnect.Do(func() {
-		close(connection.chanA)
-		close(connection.chanB)
+	connection.destroy.Do(func() {
+		close(connection.done)
 	})
 }
 
 type PhysicalInterface struct {
-	connection *Connection
-	addresses  []uint32 // slice for IP aliasing
-	send       chan<- Datagram
-	receive    <-chan Datagram
+	addresses     []uint32 // slice for IP aliasing
+	newConnection chan *Connection
+	connection    *Connection
+}
+
+func (pi *PhysicalInterface) start() {
+	for {
+		select {
+		case datagram := <-pi.connection.receive:
+			fmt.Println(datagram)
+		case <-pi.connection.done:
+			pi.connection.send, pi.connection.receive = nil, nil
+		case conn := <-pi.newConnection:
+			pi.connection.close()
+			pi.connection.send, pi.connection.receive, pi.connection = conn.send, conn.receive, conn
+		}
+	}
 }
 
 type Module struct {
+	mutex              sync.RWMutex
 	physicalInterfaces map[string]*PhysicalInterface
 }
 
-func (module *Module) listen() error {
-	physicalInterface, ok := module.physicalInterfaces[eth0InterfaceName]
-	if !ok {
-		return errors.New("module cannot listen as interface uninitialised")
-	}
-	if physicalInterface.receive == nil {
-		return errors.New("module cannot listen as interface receive channel uninitialised")
-	}
+func (module *Module) start() {
+	module.mutex.RLock()
+	defer module.mutex.RUnlock()
 
-	for datagram := range physicalInterface.receive {
-		fmt.Println(datagram)
+	for _, physicalInterface := range module.physicalInterfaces {
+		go physicalInterface.start()
 	}
-
-	// ensure send channel is also closed
-	physicalInterface.connection.close()
-	physicalInterface.connection = nil
-	physicalInterface.send, physicalInterface.receive = nil, nil
-
-	return nil
 }
 
-func (module *Module) send(d Datagram) {
-	module.physicalInterfaces[eth0InterfaceName].send <- d
+func (module *Module) send(d Datagram) error {
+	module.mutex.RLock()
+	defer module.mutex.RUnlock()
+
+	physicalInterface := module.physicalInterfaces[eth0InterfaceName]
+	select {
+	case <-physicalInterface.connection.done:
+		return errors.New("cannot send datagram as connection has been closed")
+	case physicalInterface.connection.send <- d:
+	}
+
+	return nil
 }
 
 // The IP module for a host
@@ -87,7 +99,7 @@ type Host struct {
 
 func makeHost() Host {
 	return Host{
-		Module: Module{make(map[string]*PhysicalInterface)},
+		Module: Module{sync.RWMutex{}, make(map[string]*PhysicalInterface)},
 	}
 }
 
@@ -103,7 +115,7 @@ type Gateway struct {
 
 func makeGateway() Gateway {
 	return Gateway{
-		Module:              Module{make(map[string]*PhysicalInterface)},
+		Module:              Module{sync.RWMutex{}, make(map[string]*PhysicalInterface)},
 		address:             0b0000_1000_0000_0001,
 		nextFreeHostAddress: 0b0000_1000_0000_0010,
 		connectedHosts:      make([]Address, 0, 64),
@@ -117,6 +129,7 @@ func (gateway *Gateway) reserveAddress() Address {
 	return address
 }
 
+// TODO: shift most of this connect code into a module method
 // connect connects a gateway interface to an interface of a host.
 //
 // It will set the gateway address on the host so it knows where to find the default gateway.
@@ -129,24 +142,26 @@ func (gateway *Gateway) connect(host *Host) error {
 	hostNetworkAddress := gateway.reserveAddress()
 	host.gatewayAddress = gateway.address
 
-	// Set up send / receive channels (a multiplexed connection) between gateway and host
-	connection := Connection{
-		chanA: make(chan Datagram),
-		chanB: make(chan Datagram),
+	// Set up send / receive channels between gateway and host
+	chanA, chanB, done := make(chan Datagram), make(chan Datagram), make(chan struct{})
+	gatewayToHostConnection := Connection{
+		send:    chanA,
+		receive: chanB,
+		done:    done,
 	}
-
-	host.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
-		connection: &connection,
-		addresses:  []Address{hostNetworkAddress},
-		send:       connection.chanA,
-		receive:    connection.chanB,
+	hostToGatewayConnection := Connection{
+		send:    chanB,
+		receive: chanA,
+		done:    done,
 	}
 
 	gateway.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
-		connection: &connection,
+		connection: &gatewayToHostConnection,
 		addresses:  []Address{gateway.address, hostNetworkAddress},
-		send:       connection.chanB,
-		receive:    connection.chanA,
+	}
+	host.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
+		connection: &hostToGatewayConnection,
+		addresses:  []Address{hostNetworkAddress},
 	}
 
 	return nil
@@ -154,7 +169,6 @@ func (gateway *Gateway) connect(host *Host) error {
 
 func (gateway *Gateway) disconnect(interfaceName string) {
 	gateway.physicalInterfaces[interfaceName].connection.close()
-	delete(gateway.physicalInterfaces, interfaceName)
 }
 
 func main() {
@@ -162,14 +176,15 @@ func main() {
 	gateway := makeGateway()
 
 	gateway.connect(&host)
-	go host.listen()
-	go gateway.listen()
+	host.start()
+	gateway.start()
 	gateway.send(Datagram{})
 
 	terminate := make(chan bool)
 	go func() {
 		time.Sleep(time.Second * 2)
 		gateway.disconnect(eth0InterfaceName)
+		gateway.send(Datagram{})
 		terminate <- true
 	}()
 
