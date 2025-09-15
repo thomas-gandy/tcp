@@ -43,6 +43,22 @@ func (connection *Connection) close() {
 	})
 }
 
+func createMultiplexedConnection() (*Connection, *Connection) {
+	chanA, chanB, done := make(chan Datagram), make(chan Datagram), make(chan struct{})
+	aToB := Connection{
+		send:    chanA,
+		receive: chanB,
+		done:    done,
+	}
+	bToA := Connection{
+		send:    chanB,
+		receive: chanA,
+		done:    done,
+	}
+
+	return &aToB, &bToA
+}
+
 type PhysicalInterface struct {
 	addresses     []uint32 // slice for IP aliasing
 	newConnection chan *Connection
@@ -129,7 +145,6 @@ func (gateway *Gateway) reserveAddress() Address {
 	return address
 }
 
-// TODO: shift most of this connect code into a module method
 // connect connects a gateway interface to an interface of a host.
 //
 // It will set the gateway address on the host so it knows where to find the default gateway.
@@ -143,24 +158,13 @@ func (gateway *Gateway) connect(host *Host) error {
 	host.gatewayAddress = gateway.address
 
 	// Set up send / receive channels between gateway and host
-	chanA, chanB, done := make(chan Datagram), make(chan Datagram), make(chan struct{})
-	gatewayToHostConnection := Connection{
-		send:    chanA,
-		receive: chanB,
-		done:    done,
-	}
-	hostToGatewayConnection := Connection{
-		send:    chanB,
-		receive: chanA,
-		done:    done,
-	}
-
+	connA, connB := createMultiplexedConnection()
 	gateway.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
-		connection: &gatewayToHostConnection,
+		connection: connA,
 		addresses:  []Address{gateway.address, hostNetworkAddress},
 	}
 	host.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
-		connection: &hostToGatewayConnection,
+		connection: connB,
 		addresses:  []Address{hostNetworkAddress},
 	}
 
