@@ -73,7 +73,9 @@ func (pi *PhysicalInterface) start() {
 		case <-pi.connection.done:
 			pi.connection.send, pi.connection.receive = nil, nil
 		case conn := <-pi.newConnection:
-			pi.connection.close()
+			if pi.connection != nil {
+				pi.connection.close()
+			}
 			pi.connection.send, pi.connection.receive, pi.connection = conn.send, conn.receive, conn
 		}
 	}
