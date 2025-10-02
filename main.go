@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 )
 
 // to initially keep things simple, all hosts and gateways will have this single physical interface
@@ -34,76 +33,174 @@ type Connection struct {
 	send    chan<- Datagram
 	receive <-chan Datagram
 	done    chan struct{} // use its close as a broadcast to signal the end of the connection
-	destroy sync.Once
+	destroy *sync.Once
 }
 
 func (connection *Connection) close() {
 	connection.destroy.Do(func() {
-		close(connection.done)
+		if connection.done != nil {
+			close(connection.done)
+		}
 	})
 }
 
 func createMultiplexedConnection() (*Connection, *Connection) {
-	chanA, chanB, done := make(chan Datagram), make(chan Datagram), make(chan struct{})
+	chanA, chanB := make(chan Datagram), make(chan Datagram)
+	done, destroy := make(chan struct{}), &sync.Once{}
 	aToB := Connection{
 		send:    chanA,
 		receive: chanB,
 		done:    done,
+		destroy: destroy,
 	}
 	bToA := Connection{
 		send:    chanB,
 		receive: chanA,
 		done:    done,
+		destroy: destroy,
 	}
 
 	return &aToB, &bToA
 }
 
 type PhysicalInterface struct {
-	addresses     []uint32 // slice for IP aliasing
-	newConnection chan *Connection
-	connection    *Connection
+	conn                 *Connection
+	listenerGoroutinesWg chan *sync.WaitGroup
 }
 
-func (pi *PhysicalInterface) start() {
+func newPhysicalInterface() *PhysicalInterface {
+	physicalInterface := &PhysicalInterface{
+		conn:                 &Connection{done: make(chan struct{}), destroy: &sync.Once{}},
+		listenerGoroutinesWg: make(chan *sync.WaitGroup, 1),
+	}
+	physicalInterface.listenerGoroutinesWg <- &sync.WaitGroup{}
+
+	return physicalInterface
+}
+
+func (pi *PhysicalInterface) Listen() {
+	wg := <-pi.listenerGoroutinesWg
+	defer func() {
+		pi.listenerGoroutinesWg <- wg
+	}()
+
+	pi.listen(wg)
+}
+
+func (pi *PhysicalInterface) listen(wg *sync.WaitGroup) {
+	wg.Wait() // ensure only one listen routine occurs at any given time
+	wg.Go(pi.passiveListenDatagram)
+	wg.Go(pi.passiveListenConnectionDone)
+}
+
+func (pi *PhysicalInterface) passiveListenDatagram() {
 	for {
 		select {
-		case datagram := <-pi.connection.receive:
+		case datagram := <-pi.conn.receive:
 			fmt.Println(datagram)
-		case <-pi.connection.done:
-			pi.connection.send, pi.connection.receive = nil, nil
-		case conn := <-pi.newConnection:
-			if pi.connection != nil {
-				pi.connection.close()
-			}
-			pi.connection.send, pi.connection.receive, pi.connection = conn.send, conn.receive, conn
+		case <-pi.conn.done:
+			return
 		}
 	}
 }
 
+func (pi *PhysicalInterface) passiveListenConnectionDone() {
+	<-pi.conn.done
+	pi.conn.send, pi.conn.receive = nil, nil
+}
+
+func (pi *PhysicalInterface) stop() {
+	pi.conn.close()
+
+	wg := <-pi.listenerGoroutinesWg
+	defer func() {
+		pi.listenerGoroutinesWg <- wg
+	}()
+
+	wg.Wait()
+}
+
+func (pi *PhysicalInterface) setConnection(newConnection *Connection) {
+	pi.conn.close()
+	wg := <-pi.listenerGoroutinesWg
+	defer func() {
+		pi.listenerGoroutinesWg <- wg
+	}()
+
+	wg.Wait()
+	pi.conn = newConnection
+	pi.listen(wg)
+}
+
 type Module struct {
-	mutex              sync.RWMutex
-	physicalInterfaces map[string]*PhysicalInterface
+	physicalInterfacesMutex sync.RWMutex
+	physicalInterfaces      map[string]*PhysicalInterface
 }
 
-func (module *Module) start() {
-	module.mutex.RLock()
-	defer module.mutex.RUnlock()
-
-	for _, physicalInterface := range module.physicalInterfaces {
-		go physicalInterface.start()
+func newModule() *Module {
+	module := Module{sync.RWMutex{}, make(map[string]*PhysicalInterface)}
+	err := module.addPhysicalInterface(eth0InterfaceName)
+	if err != nil {
+		panic("failed to add physical interface when creating a new module")
 	}
+
+	return &module
 }
 
-func (module *Module) send(d Datagram) error {
-	module.mutex.RLock()
-	defer module.mutex.RUnlock()
+func (module *Module) addPhysicalInterface(name string) error {
+	module.physicalInterfacesMutex.Lock()
+	defer module.physicalInterfacesMutex.Unlock()
+
+	_, exists := module.physicalInterfaces[name]
+	if exists {
+		return fmt.Errorf("interface %s already exists", name)
+	}
+
+	physicalInterface := newPhysicalInterface()
+	module.physicalInterfaces[name] = physicalInterface
+
+	return nil
+}
+
+func (module *Module) setInterfaceConnection(interfaceName string, conn *Connection) error {
+	module.physicalInterfacesMutex.Lock()
+	defer module.physicalInterfacesMutex.Unlock()
+
+	physicalInterface, exists := module.physicalInterfaces[interfaceName]
+	if !exists {
+		return errors.New("interface doesn't exist")
+	}
+	physicalInterface.setConnection(conn)
+
+	return nil
+}
+
+func (module *Module) stop() {
+	module.physicalInterfacesMutex.RLock()
+	defer module.physicalInterfacesMutex.RUnlock()
+
+	wg := sync.WaitGroup{}
+	for _, physicalInterface := range module.physicalInterfaces {
+		wg.Go(physicalInterface.stop)
+	}
+	wg.Wait()
+}
+
+func (module *Module) send(d Datagram) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New("failed to send datagram as send channel has been closed")
+		}
+	}()
+
+	module.physicalInterfacesMutex.RLock()
+	defer module.physicalInterfacesMutex.RUnlock()
 
 	physicalInterface := module.physicalInterfaces[eth0InterfaceName]
 	select {
-	case <-physicalInterface.connection.done:
+	case <-physicalInterface.conn.done:
 		return errors.New("cannot send datagram as connection has been closed")
-	case physicalInterface.connection.send <- d:
+	case physicalInterface.conn.send <- d:
 	}
 
 	return nil
@@ -111,88 +208,52 @@ func (module *Module) send(d Datagram) error {
 
 // The IP module for a host
 type Host struct {
-	Module
-	gatewayAddress Address
+	*Module
 }
 
-func makeHost() Host {
-	return Host{
-		Module: Module{sync.RWMutex{}, make(map[string]*PhysicalInterface)},
-	}
+func newHost() *Host {
+	return &Host{Module: newModule()}
 }
 
 type Address = uint32
 
 // The IP module for a gateway
 type Gateway struct {
-	Module
-	address             Address
-	nextFreeHostAddress Address
-	connectedHosts      []Address
+	*Module
 }
 
-func makeGateway() Gateway {
-	return Gateway{
-		Module:              Module{sync.RWMutex{}, make(map[string]*PhysicalInterface)},
-		address:             0b0000_1000_0000_0001,
-		nextFreeHostAddress: 0b0000_1000_0000_0010,
-		connectedHosts:      make([]Address, 0, 64),
+func newGateway() *Gateway {
+	return &Gateway{
+		Module: newModule(),
 	}
 }
 
-func (gateway *Gateway) reserveAddress() Address {
-	address := gateway.nextFreeHostAddress
-	gateway.nextFreeHostAddress++
-
-	return address
-}
-
-// connect connects a gateway interface to an interface of a host.
-//
-// It will set the gateway address on the host so it knows where to find the default gateway.
-//
-// It will bind an address (unique for the network defined by the gateway) to a physical interface
-// on the host, which will act as the source IP for sends, and destination IP for receives.  It
-// will link up the host's physical interface's send and receive channels between it and the
-// gateway's physical interface.
-func (gateway *Gateway) connect(host *Host) error {
-	hostNetworkAddress := gateway.reserveAddress()
-	host.gatewayAddress = gateway.address
-
-	// Set up send / receive channels between gateway and host
+func (gateway *Gateway) connectHost(host *Host, gInterface, hInterface string) error {
 	connA, connB := createMultiplexedConnection()
-	gateway.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
-		connection: connA,
-		addresses:  []Address{gateway.address, hostNetworkAddress},
-	}
-	host.physicalInterfaces[eth0InterfaceName] = &PhysicalInterface{
-		connection: connB,
-		addresses:  []Address{hostNetworkAddress},
-	}
+	connected := make(chan struct{}, 2)
+
+	go func() {
+		gateway.setInterfaceConnection(gInterface, connA)
+		connected <- struct{}{}
+	}()
+	go func() {
+		host.setInterfaceConnection(hInterface, connB)
+		connected <- struct{}{}
+	}()
+
+	<-connected
+	<-connected
 
 	return nil
 }
 
-func (gateway *Gateway) disconnect(interfaceName string) {
-	gateway.physicalInterfaces[interfaceName].connection.close()
-}
-
 func main() {
-	host := makeHost()
-	gateway := makeGateway()
+	host := newHost()
+	defer host.stop()
 
-	gateway.connect(&host)
-	host.start()
-	gateway.start()
+	gateway := newGateway()
+	defer gateway.stop()
+
+	gateway.connectHost(host, eth0InterfaceName, eth0InterfaceName)
 	gateway.send(Datagram{})
-
-	terminate := make(chan bool)
-	go func() {
-		time.Sleep(time.Second * 2)
-		gateway.disconnect(eth0InterfaceName)
-		gateway.send(Datagram{})
-		terminate <- true
-	}()
-
-	<-terminate
 }
