@@ -64,22 +64,29 @@ func createMultiplexedConnection() (*Connection, *Connection) {
 }
 
 type PhysicalInterface struct {
-	conn                 *Connection
-	listenerGoroutinesWg chan *sync.WaitGroup
+	conn                     *Connection
+	listenerGoroutinesWg     chan *sync.WaitGroup
+	listenerGoroutinesActive bool
 }
 
 func newPhysicalInterface() *PhysicalInterface {
-	physicalInterface := &PhysicalInterface{
-		conn: &Connection{
-			send:    make(chan Datagram), // this will be immediately closed
-			receive: nil,
-			done:    make(chan struct{}),
-			destroy: &sync.Once{},
-		},
-		listenerGoroutinesWg: make(chan *sync.WaitGroup, 1),
+	closedSendChannel := make(chan Datagram)
+	close(closedSendChannel)
+
+	sentinelConnection := &Connection{
+		send:    closedSendChannel,
+		receive: nil,
+		done:    make(chan struct{}),
+		destroy: &sync.Once{},
 	}
-	close(physicalInterface.conn.send)
-	physicalInterface.listenerGoroutinesWg <- &sync.WaitGroup{}
+
+	listenerGoroutinesWg := make(chan *sync.WaitGroup, 1)
+	listenerGoroutinesWg <- &sync.WaitGroup{}
+
+	physicalInterface := &PhysicalInterface{
+		conn:                 sentinelConnection,
+		listenerGoroutinesWg: listenerGoroutinesWg,
+	}
 
 	return physicalInterface
 }
@@ -94,9 +101,14 @@ func (pi *PhysicalInterface) Listen() {
 }
 
 func (pi *PhysicalInterface) listen(wg *sync.WaitGroup) {
+	if pi.listenerGoroutinesActive {
+		return
+	}
+
 	wg.Wait() // ensure only one listen routine occurs at any given time
 	wg.Go(pi.passiveListenDatagram)
 	wg.Go(pi.passiveListenConnectionDone)
+	pi.listenerGoroutinesActive = true
 }
 
 func (pi *PhysicalInterface) passiveListenDatagram() {
@@ -124,6 +136,7 @@ func (pi *PhysicalInterface) stop() {
 	}()
 
 	wg.Wait()
+	pi.listenerGoroutinesActive = false
 }
 
 func (pi *PhysicalInterface) setConnection(newConnection *Connection) {
@@ -135,7 +148,6 @@ func (pi *PhysicalInterface) setConnection(newConnection *Connection) {
 
 	wg.Wait()
 	pi.conn = newConnection
-	pi.listen(wg)
 }
 
 type Module struct {
@@ -178,6 +190,19 @@ func (module *Module) setInterfaceConnection(interfaceName string, conn *Connect
 	}
 	physicalInterface.setConnection(conn)
 
+	return nil
+}
+
+func (module *Module) passiveListenOnInterface(interfaceName string) error {
+	module.physicalInterfacesMutex.RLock()
+	physicalInterface, exists := module.physicalInterfaces[interfaceName]
+	module.physicalInterfacesMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("no interface with name %s exists", interfaceName)
+	}
+
+	physicalInterface.Listen()
 	return nil
 }
 
@@ -261,5 +286,7 @@ func main() {
 	defer gateway.stop()
 
 	gateway.connectHost(host, eth0InterfaceName, eth0InterfaceName)
+	host.passiveListenOnInterface(eth0InterfaceName)
+	gateway.passiveListenOnInterface(eth0InterfaceName)
 	gateway.send(Datagram{})
 }
