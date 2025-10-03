@@ -70,9 +70,15 @@ type PhysicalInterface struct {
 
 func newPhysicalInterface() *PhysicalInterface {
 	physicalInterface := &PhysicalInterface{
-		conn:                 &Connection{done: make(chan struct{}), destroy: &sync.Once{}},
+		conn: &Connection{
+			send:    make(chan Datagram), // this will be immediately closed
+			receive: nil,
+			done:    make(chan struct{}),
+			destroy: &sync.Once{},
+		},
 		listenerGoroutinesWg: make(chan *sync.WaitGroup, 1),
 	}
+	close(physicalInterface.conn.send)
 	physicalInterface.listenerGoroutinesWg <- &sync.WaitGroup{}
 
 	return physicalInterface
@@ -194,9 +200,9 @@ func (module *Module) send(d Datagram) (err error) {
 	}()
 
 	module.physicalInterfacesMutex.RLock()
-	defer module.physicalInterfacesMutex.RUnlock()
-
 	physicalInterface := module.physicalInterfaces[eth0InterfaceName]
+	module.physicalInterfacesMutex.RUnlock()
+
 	select {
 	case <-physicalInterface.conn.done:
 		return errors.New("cannot send datagram as connection has been closed")
