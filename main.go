@@ -148,6 +148,7 @@ func (pi *PhysicalInterface) setConnection(newConnection *Connection) {
 
 	wg.Wait()
 	pi.conn = newConnection
+	pi.listenerGoroutinesActive = false
 }
 
 type Module struct {
@@ -230,7 +231,7 @@ func (module *Module) send(d Datagram) (err error) {
 
 	select {
 	case <-physicalInterface.conn.done:
-		return errors.New("cannot send datagram as connection has been closed")
+		return errors.New("cannot send datagram as connection is done")
 	case physicalInterface.conn.send <- d:
 	}
 
@@ -259,16 +260,16 @@ func newGateway() *Gateway {
 	}
 }
 
-func (gateway *Gateway) connectHost(host *Host, gInterface, hInterface string) error {
+func connectModules(moduleA, moduleB *Module, interfaceA, interfaceB string) error {
 	connA, connB := createMultiplexedConnection()
 	connected := make(chan struct{}, 2)
 
 	go func() {
-		gateway.setInterfaceConnection(gInterface, connA)
+		moduleA.setInterfaceConnection(interfaceA, connA)
 		connected <- struct{}{}
 	}()
 	go func() {
-		host.setInterfaceConnection(hInterface, connB)
+		moduleB.setInterfaceConnection(interfaceB, connB)
 		connected <- struct{}{}
 	}()
 
@@ -285,7 +286,7 @@ func main() {
 	gateway := newGateway()
 	defer gateway.stop()
 
-	gateway.connectHost(host, eth0InterfaceName, eth0InterfaceName)
+	connectModules(gateway.Module, host.Module, eth0InterfaceName, eth0InterfaceName)
 	host.passiveListenOnInterface(eth0InterfaceName)
 	gateway.passiveListenOnInterface(eth0InterfaceName)
 	gateway.send(Datagram{})
