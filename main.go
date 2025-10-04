@@ -97,10 +97,6 @@ func (pi *PhysicalInterface) Listen() {
 		pi.listenerGoroutinesWg <- wg
 	}()
 
-	pi.listen(wg)
-}
-
-func (pi *PhysicalInterface) listen(wg *sync.WaitGroup) {
 	if pi.listenerGoroutinesActive {
 		return
 	}
