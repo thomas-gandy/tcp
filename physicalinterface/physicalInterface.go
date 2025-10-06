@@ -20,8 +20,8 @@ type Header struct {
 }
 
 type Datagram struct {
-	header Header
-	data   []uint8
+	Header Header
+	Data   []uint8
 }
 
 // A multiplexed connection representing real-world physical transmission (e.g. wire or wireless)

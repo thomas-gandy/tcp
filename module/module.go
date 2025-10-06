@@ -1,6 +1,8 @@
 package module
 
 import (
+	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"sync"
@@ -57,7 +59,7 @@ func (module *Module) PassiveListenOnInterface(interfaceName string) error {
 	return nil
 }
 
-func (module *Module) Send(d physicalinterface.Datagram) (err error) {
+func (module *Module) Send(data any) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New("failed to send datagram as send channel has been closed")
@@ -68,10 +70,21 @@ func (module *Module) Send(d physicalinterface.Datagram) (err error) {
 	physicalInterface := module.physicalInterfaces[Eth0InterfaceName]
 	module.physicalInterfacesMutex.RUnlock()
 
+	buffer := bytes.Buffer{}
+	encoder := gob.NewEncoder(&buffer)
+	if err := encoder.Encode(data); err != nil {
+		fmt.Println(err.Error())
+		return errors.New("failed to encode data into bytes for sending")
+	}
+
+	header := physicalinterface.Header{}
+	byteData := buffer.Bytes()
+	datagram := physicalinterface.Datagram{Header: header, Data: byteData}
+
 	select {
 	case <-physicalInterface.Conn.Done:
 		return errors.New("cannot send datagram as connection is done")
-	case physicalInterface.Conn.Send <- d:
+	case physicalInterface.Conn.Send <- datagram:
 	}
 
 	return nil
