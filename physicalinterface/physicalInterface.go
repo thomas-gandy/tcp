@@ -97,12 +97,12 @@ func NewPhysicalInterface() *PhysicalInterface {
 }
 
 func (pi *PhysicalInterface) SetConnection(newConnection *Connection) {
-	pi.Conn.Close()
 	wg := <-pi.listenerGoroutinesWg
 	defer func() {
 		pi.listenerGoroutinesWg <- wg
 	}()
 
+	pi.Conn.Close()
 	wg.Wait()
 	pi.Conn = newConnection
 
@@ -137,13 +137,12 @@ func (pi *PhysicalInterface) UnbindAddress(address Address) {
 }
 
 func (pi *PhysicalInterface) Stop() {
-	pi.Conn.Close()
-
 	wg := <-pi.listenerGoroutinesWg
 	defer func() {
 		pi.listenerGoroutinesWg <- wg
 	}()
 
+	pi.Conn.Close()
 	wg.Wait()
 	pi.listenerGoroutinesActive = false
 }
