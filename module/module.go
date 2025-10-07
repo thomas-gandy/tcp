@@ -57,7 +57,19 @@ func (module *Module) PassiveListenOnInterface(interfaceName string) error {
 	return nil
 }
 
-func (module *Module) Send(data []byte) (err error) {
+func (module *Module) BindAddressToInterface(address physicalinterface.Address, interfaceName string) error {
+	module.physicalInterfacesMutex.RLock()
+	defer module.physicalInterfacesMutex.RUnlock()
+
+	if pi, exists := module.physicalInterfaces[interfaceName]; exists {
+		pi.BindAddress(address)
+		return nil
+	}
+
+	return fmt.Errorf("couldn't bind address to interface %s as it doesn't exist", interfaceName)
+}
+
+func (module *Module) Send(data []byte, dstAddr physicalinterface.Address) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New("failed to send datagram as send channel has been closed")
@@ -68,7 +80,7 @@ func (module *Module) Send(data []byte) (err error) {
 	physicalInterface := module.physicalInterfaces[Eth0InterfaceName]
 	module.physicalInterfacesMutex.RUnlock()
 
-	header := physicalinterface.Header{}
+	header := physicalinterface.Header{DestinationAddress: dstAddr}
 	datagram := physicalinterface.Datagram{Header: header, Data: data}
 
 	select {
@@ -107,8 +119,8 @@ func (module *Module) addPhysicalInterface(name string) error {
 }
 
 func (module *Module) setInterfaceConnection(interfaceName string, conn *physicalinterface.Connection) error {
-	module.physicalInterfacesMutex.Lock()
-	defer module.physicalInterfacesMutex.Unlock()
+	module.physicalInterfacesMutex.RLock()
+	defer module.physicalInterfacesMutex.RUnlock()
 
 	physicalInterface, exists := module.physicalInterfaces[interfaceName]
 	if !exists {

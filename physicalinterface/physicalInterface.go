@@ -6,23 +6,25 @@ import (
 )
 
 type Header struct {
-	version            uint8 // with IHL
-	typeOfService      uint8
-	totalLength        uint16
-	identification     uint16
-	fragmentOffset     uint16 // with flags
-	timeToLive         uint8
-	protocol           uint8
-	headerChecksum     uint16
-	sourceAddress      uint32
-	destinationAddress uint32
-	options            []uint8
+	Version            uint8 // with IHL
+	TypeOfService      uint8
+	TotalLength        uint16
+	Identification     uint16
+	FragmentOffset     uint16 // with flags
+	TimeToLive         uint8
+	Protocol           uint8
+	HeaderChecksum     uint16
+	SourceAddress      uint32
+	DestinationAddress uint32
+	Options            []uint8
 }
 
 type Datagram struct {
 	Header Header
 	Data   []uint8
 }
+
+type Address = uint32
 
 // A multiplexed connection representing real-world physical transmission (e.g. wire or wireless)
 type Connection struct {
@@ -75,6 +77,8 @@ func CreateMultiplexedConnection() (*Connection, *Connection) {
 
 type PhysicalInterface struct {
 	Conn                     *Connection
+	addresses                map[Address]struct{}
+	addressesMutex           sync.RWMutex
 	listenerGoroutinesWg     chan *sync.WaitGroup
 	listenerGoroutinesActive bool
 }
@@ -85,6 +89,7 @@ func NewPhysicalInterface() *PhysicalInterface {
 
 	physicalInterface := &PhysicalInterface{
 		Conn:                 newSentinelConnection(),
+		addresses:            make(map[Address]struct{}, 4),
 		listenerGoroutinesWg: listenerGoroutinesWg,
 	}
 
@@ -100,7 +105,10 @@ func (pi *PhysicalInterface) SetConnection(newConnection *Connection) {
 
 	wg.Wait()
 	pi.Conn = newConnection
-	pi.listenerGoroutinesActive = false
+
+	if pi.listenerGoroutinesActive {
+		pi.listen(wg)
+	}
 }
 
 func (pi *PhysicalInterface) Listen() {
@@ -109,14 +117,23 @@ func (pi *PhysicalInterface) Listen() {
 		pi.listenerGoroutinesWg <- wg
 	}()
 
-	if pi.listenerGoroutinesActive {
-		return
+	if !pi.listenerGoroutinesActive {
+		pi.listen(wg)
 	}
+}
 
-	wg.Wait() // ensure only one listen routine occurs at any given time
-	wg.Go(pi.passiveListenDatagram)
-	wg.Go(pi.passiveListenConnectionDone)
-	pi.listenerGoroutinesActive = true
+func (pi *PhysicalInterface) BindAddress(address Address) {
+	pi.addressesMutex.Lock()
+	defer pi.addressesMutex.Unlock()
+
+	pi.addresses[address] = struct{}{}
+}
+
+func (pi *PhysicalInterface) UnbindAddress(address Address) {
+	pi.addressesMutex.Lock()
+	defer pi.addressesMutex.Unlock()
+
+	delete(pi.addresses, address)
 }
 
 func (pi *PhysicalInterface) Stop() {
@@ -135,7 +152,7 @@ func (pi *PhysicalInterface) passiveListenDatagram() {
 	for {
 		select {
 		case datagram := <-pi.Conn.Receive:
-			fmt.Println(datagram)
+			pi.handleDatagram(&datagram)
 		case <-pi.Conn.Done:
 			return
 		}
@@ -145,4 +162,21 @@ func (pi *PhysicalInterface) passiveListenDatagram() {
 func (pi *PhysicalInterface) passiveListenConnectionDone() {
 	<-pi.Conn.Done
 	pi.Conn.Send, pi.Conn.Receive = nil, nil
+}
+
+func (pi *PhysicalInterface) listen(wg *sync.WaitGroup) {
+	wg.Go(pi.passiveListenDatagram)
+	wg.Go(pi.passiveListenConnectionDone)
+	pi.listenerGoroutinesActive = true
+}
+
+func (pi *PhysicalInterface) handleDatagram(datagram *Datagram) {
+	pi.addressesMutex.RLock()
+	defer pi.addressesMutex.RUnlock()
+
+	if _, exists := pi.addresses[datagram.Header.DestinationAddress]; exists {
+		fmt.Println("received datagram: ", datagram)
+	} else {
+		fmt.Println("rejected datagram: ", datagram)
+	}
 }

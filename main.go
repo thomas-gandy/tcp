@@ -2,18 +2,22 @@ package main
 
 import (
 	"tcp/module"
+	"tcp/physicalinterface"
 )
 
 func main() {
+	defaultInterface := module.Eth0InterfaceName
+
 	host := module.NewHost()
+	hostAddress := physicalinterface.Address(333)
+	host.BindAddressToInterface(hostAddress, defaultInterface)
+	host.PassiveListenOnInterface(defaultInterface)
 	defer host.Stop()
 
 	gateway := module.NewGateway()
+	gateway.PassiveListenOnInterface(defaultInterface)
 	defer gateway.Stop()
 
-	defaultInterface := module.Eth0InterfaceName
 	module.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
-	host.PassiveListenOnInterface(defaultInterface)
-	gateway.PassiveListenOnInterface(defaultInterface)
-	gateway.Send([]byte("hello"))
+	gateway.Send([]byte("hello"), hostAddress)
 }
