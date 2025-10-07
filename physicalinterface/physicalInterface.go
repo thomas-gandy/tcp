@@ -32,7 +32,7 @@ type Connection struct {
 	destroy *sync.Once
 }
 
-func NewSentinelConnection() *Connection {
+func newSentinelConnection() *Connection {
 	closedSendChannel := make(chan Datagram)
 	close(closedSendChannel)
 
@@ -84,7 +84,7 @@ func NewPhysicalInterface() *PhysicalInterface {
 	listenerGoroutinesWg <- &sync.WaitGroup{}
 
 	physicalInterface := &PhysicalInterface{
-		Conn:                 NewSentinelConnection(),
+		Conn:                 newSentinelConnection(),
 		listenerGoroutinesWg: listenerGoroutinesWg,
 	}
 

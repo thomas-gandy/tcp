@@ -15,5 +15,5 @@ func main() {
 	module.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
 	host.PassiveListenOnInterface(defaultInterface)
 	gateway.PassiveListenOnInterface(defaultInterface)
-	gateway.Send("hello")
+	gateway.Send([]byte("hello"))
 }
