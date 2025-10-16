@@ -10,12 +10,12 @@ func main() {
 
 	host := module.NewHost()
 	hostAddress := physicalinterface.Address(333)
-	host.BindAddressToInterface(hostAddress, defaultInterface)
-	host.PassiveListenOnInterface(defaultInterface)
+	host.BindAddress(hostAddress, defaultInterface)
+	host.PassiveListen(defaultInterface)
 	defer host.Stop()
 
 	gateway := module.NewGateway()
-	gateway.PassiveListenOnInterface(defaultInterface)
+	gateway.PassiveListen(defaultInterface)
 	defer gateway.Stop()
 
 	module.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)

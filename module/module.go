@@ -44,7 +44,7 @@ func ConnectModules(moduleA, moduleB *Module, interfaceA, interfaceB string) err
 	return nil
 }
 
-func (module *Module) PassiveListenOnInterface(interfaceName string) error {
+func (module *Module) PassiveListen(interfaceName string) error {
 	module.physicalInterfacesMutex.RLock()
 	physicalInterface, exists := module.physicalInterfaces[interfaceName]
 	module.physicalInterfacesMutex.RUnlock()
@@ -57,12 +57,24 @@ func (module *Module) PassiveListenOnInterface(interfaceName string) error {
 	return nil
 }
 
-func (module *Module) BindAddressToInterface(address physicalinterface.Address, interfaceName string) error {
+func (module *Module) BindAddress(address physicalinterface.Address, interfaceName string) error {
 	module.physicalInterfacesMutex.RLock()
 	defer module.physicalInterfacesMutex.RUnlock()
 
 	if pi, exists := module.physicalInterfaces[interfaceName]; exists {
 		pi.BindAddress(address)
+		return nil
+	}
+
+	return fmt.Errorf("couldn't bind address to interface %s as it doesn't exist", interfaceName)
+}
+
+func (module *Module) UnbindAddress(address physicalinterface.Address, interfaceName string) error {
+	module.physicalInterfacesMutex.RLock()
+	defer module.physicalInterfacesMutex.RUnlock()
+
+	if pi, exists := module.physicalInterfaces[interfaceName]; exists {
+		pi.UnbindAddress(address)
 		return nil
 	}
 
