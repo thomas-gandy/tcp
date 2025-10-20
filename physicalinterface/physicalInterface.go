@@ -6,22 +6,64 @@ import (
 )
 
 type Header struct {
-	Version            uint8 // with IHL
-	TypeOfService      uint8
-	TotalLength        uint16
-	Identification     uint16
-	FragmentOffset     uint16 // with flags
-	TimeToLive         uint8
-	Protocol           uint8
-	HeaderChecksum     uint16
-	SourceAddress      uint32
-	DestinationAddress uint32
-	Options            []uint8
+	VersionAndIHL          uint8 // with IHL
+	TypeOfService          uint8
+	TotalLength            uint16
+	Identification         uint16
+	FlagsAndFragmentOffset uint16 // with flags
+	TimeToLive             uint8
+	Protocol               uint8
+	HeaderChecksum         uint16
+	SourceAddress          uint32
+	DestinationAddress     uint32
+	Options                []uint8
+}
+
+const (
+	fragmentOffsetBitLength        = 13
+	FlagDontFragment        uint16 = 0b010 << fragmentOffsetBitLength
+	flagMoreFragments       uint16 = 0b001 << fragmentOffsetBitLength
+)
+
+func (h *Header) SetVersion(version uint8) {
+	h.VersionAndIHL |= version << 4
+}
+
+func (h *Header) SetIHL(ihl uint8) {
+	h.VersionAndIHL |= ihl
+}
+
+func (h *Header) GetIHL() uint8 {
+	return h.VersionAndIHL & 0b1111
+}
+
+func (h *Header) MayFragment() bool {
+	return h.FlagsAndFragmentOffset&FlagDontFragment == 0
+}
+
+func (h *Header) SetMayFragment(allowFragmentation bool) {
+	h.setFlagState(FlagDontFragment, !allowFragmentation)
+}
+
+func (h *Header) MoreFragments() bool {
+	return h.FlagsAndFragmentOffset&flagMoreFragments == 1
+}
+
+func (h *Header) SetMoreFragments(moreFragments bool) {
+	h.setFlagState(flagMoreFragments, moreFragments)
+}
+
+func (h *Header) setFlagState(flag uint16, enable bool) {
+	if enable {
+		h.FlagsAndFragmentOffset |= flag
+	} else {
+		h.FlagsAndFragmentOffset &^= flag
+	}
 }
 
 type Datagram struct {
 	Header Header
-	Data   []uint8
+	Data   []byte
 }
 
 type Address = uint32

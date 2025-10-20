@@ -20,4 +20,5 @@ func main() {
 
 	module.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
 	gateway.Send([]byte("hello"), hostAddress)
+	gateway.Send(make([]byte, 572), hostAddress)
 }
