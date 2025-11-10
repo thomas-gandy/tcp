@@ -3,14 +3,36 @@ package physicalinterface
 import (
 	"fmt"
 	"sync"
+	"unsafe"
+)
+
+const (
+	fragmentOffsetBitLength               = 13
+	fragmentOffsetBitMask                 = 0b0001_1111_1111_1111
+	FlagDontFragment               uint16 = 0b010 << fragmentOffsetBitLength
+	flagMoreFragments              uint16 = 0b001 << fragmentOffsetBitLength
+	headerByteLengthWithoutOptions        = 20
+
+	HeaderOptionTypeCopiedFlagMask = 0b1000_0000
+	HeaderOptionTypeClassMask      = 0b0110_0000
+	HeaderOptionTypeNumberMask     = 0b0001_1111
+
+	HeaderOptionEndOfOptions        = 0b0000_0000
+	HeaderOptionNoOperation         = 0b0000_0000
+	HeaderOptionSecurity            = 0b0000_0000
+	HeaderOptionLooseSourceRouting  = 0b0000_0000
+	HeaderOptionStrictSourceRouting = 0b0000_0000
+	HeaderOptionRecordRoute         = 0b0000_0000
+	HeaderOptionStreamId            = 0b0000_0000
+	HeaderOptionInternetTimestamp   = 0b0000_0000
 )
 
 type Header struct {
-	VersionAndIHL          uint8 // with IHL
+	VersionAndIHL          uint8 // version (4-bits) and IHL (4-bits)
 	TypeOfService          uint8
 	TotalLength            uint16
 	Identification         uint16
-	FlagsAndFragmentOffset uint16 // with flags
+	FlagsAndFragmentOffset uint16 // flags (3-bits) and fragment offset (13-bits)
 	TimeToLive             uint8
 	Protocol               uint8
 	HeaderChecksum         uint16
@@ -19,22 +41,20 @@ type Header struct {
 	Options                []uint8
 }
 
-const (
-	fragmentOffsetBitLength        = 13
-	FlagDontFragment        uint16 = 0b010 << fragmentOffsetBitLength
-	flagMoreFragments       uint16 = 0b001 << fragmentOffsetBitLength
-)
-
 func (h *Header) SetVersion(version uint8) {
 	h.VersionAndIHL |= version << 4
 }
 
-func (h *Header) SetIHL(ihl uint8) {
-	h.VersionAndIHL |= ihl
+func (h *Header) SetIHL(dwords uint8) {
+	h.VersionAndIHL |= dwords
 }
 
 func (h *Header) GetIHL() uint8 {
-	return h.VersionAndIHL & 0b1111
+	return h.VersionAndIHL & 0b0000_1111
+}
+
+func (h *Header) GetIHLInBytes() uint16 {
+	return uint16(h.VersionAndIHL&0b0000_1111) * 4
 }
 
 func (h *Header) MayFragment() bool {
@@ -51,6 +71,75 @@ func (h *Header) MoreFragments() bool {
 
 func (h *Header) SetMoreFragments(moreFragments bool) {
 	h.setFlagState(flagMoreFragments, moreFragments)
+}
+
+func (h *Header) SetFragmentOffset(offset uint16) {
+	h.FlagsAndFragmentOffset &^= fragmentOffsetBitMask
+	h.FlagsAndFragmentOffset |= offset & fragmentOffsetBitMask
+}
+
+func (h *Header) GetFragmentOffset() uint16 {
+	return h.FlagsAndFragmentOffset & fragmentOffsetBitMask
+}
+
+func (h *Header) GetChecksum() uint16 {
+	data := (*uint16)(unsafe.Pointer(h))
+	chunkCount := int(h.GetIHL()) * 2 // 16-bit chunk sizes
+	var sum uint16 = 0
+
+	for range 5 {
+		sum = onesComplementSum(sum, *data)
+		data = (*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(data)) + 16))
+	}
+
+	data = (*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(data)) + 16)) // skip checksum itself
+
+	for i := 6; i < chunkCount; i++ {
+		sum = onesComplementSum(sum, *data)
+		data = (*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(data)) + 16))
+	}
+
+	return ^sum
+}
+
+func (h *Header) GetFragmentCopyableOptionData() []uint8 {
+	ihlByteCount := h.GetIHLInBytes()
+	optionsCount := uint8(ihlByteCount - headerByteLengthWithoutOptions)
+	if optionsCount == 0 {
+		return make([]uint8, 0)
+	}
+
+	optionTypeIndex := uint8(0)
+	result := make([]uint8, 0, optionsCount)
+	for optionTypeIndex < optionsCount {
+		optionType := h.Options[optionTypeIndex]
+
+		if optionType == 0 {
+			break
+		}
+
+		if optionType&HeaderOptionTypeCopiedFlagMask == 1 {
+			number := optionType & HeaderOptionTypeNumberMask
+
+			if number >= 2 {
+				optionLength := h.Options[optionTypeIndex+1]
+				result = append(result, h.Options[optionTypeIndex:optionLength]...)
+				optionTypeIndex += optionLength
+			} else {
+				result = append(result, optionType)
+				optionTypeIndex++
+			}
+		}
+	}
+
+	return result
+}
+
+func onesComplementSum(a, b uint16) uint16 {
+	var result uint32 = uint32(a) + uint32(b)
+	var carry uint16 = uint16(result>>16) & 1
+
+	return uint16(result&0xFFFF) + carry
 }
 
 func (h *Header) setFlagState(flag uint16, enable bool) {

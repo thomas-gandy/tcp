@@ -9,7 +9,7 @@ import (
 
 // to initially keep things simple, all hosts and gateways will have this single physical interface
 const Eth0InterfaceName string = "eth0"
-const minMtuLength uint16 = 576
+const minMtuLength uint16 = 576 // currently, ensure is divisble by 8 (has to be for frag offset)
 
 type Module struct {
 	physicalInterfacesMutex sync.RWMutex
@@ -151,11 +151,17 @@ func (module *Module) fragment(datagram *physicalinterface.Datagram) ([]*physica
 
 	for i := 0; i < int(numOfFullSizedFrags); i++ {
 		fragmentHeader := datagram.Header
+		fragmentHeader.Identification = 0x00000000000000000000000000000000000000000
 		fragmentHeader.SetMoreFragments(true)
+		fragmentHeader.SetFragmentOffset(uint16(i * int(dataMtuLength) >> 3))
+		fragmentHeader.Options = fragmentHeader.GetFragmentCopyableOptionData()
+
+		fragmentHeader.SetIHL(5 + uint8(len(fragmentHeader.Options)>>2))
 		fragmentHeader.TotalLength = module.mtuLength
+		fragmentHeader.HeaderChecksum = uint16(fragmentHeader.GetChecksum())
 
 		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+dataMtuLength]
-		fragment := &physicalinterface.Datagram{Header: datagram.Header, Data: fragmentData}
+		fragment := &physicalinterface.Datagram{Header: fragmentHeader, Data: fragmentData}
 		fragments = append(fragments, fragment)
 
 		byteDataOffset += dataMtuLength
@@ -164,13 +170,21 @@ func (module *Module) fragment(datagram *physicalinterface.Datagram) ([]*physica
 	if byteDataOffset < totalDataLength {
 		remainingDataLength := totalDataLength - byteDataOffset
 
-		newHeader := datagram.Header
-		newHeader.SetMoreFragments(false)
-		newHeader.TotalLength = headerLength + remainingDataLength
+		fragmentHeader := datagram.Header
+		fragmentHeader.Identification = 0x00000000000000000000000000000000000000000
+		fragmentHeader.SetMoreFragments(false)
+		fragmentHeader.SetFragmentOffset(numOfFullSizedFrags * dataMtuLength >> 3)
+		fragmentHeader.Options = fragmentHeader.GetFragmentCopyableOptionData()
+
+		fragmentHeader.SetIHL(5 + uint8(len(fragmentHeader.Options)>>2))
+		fragmentHeader.TotalLength = fragmentHeader.GetIHLInBytes() + remainingDataLength
+		fragmentHeader.HeaderChecksum = fragmentHeader.GetChecksum()
 
 		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+remainingDataLength]
-		fragment := &physicalinterface.Datagram{Header: datagram.Header, Data: fragmentData}
+		fragment := &physicalinterface.Datagram{Header: fragmentHeader, Data: fragmentData}
 		fragments = append(fragments, fragment)
+	} else {
+		fragments[len(fragments)-1].Header.SetMoreFragments(false)
 	}
 
 	return fragments, nil
