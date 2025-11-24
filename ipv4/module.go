@@ -1,10 +1,9 @@
-package module
+package ipv4
 
 import (
 	"errors"
 	"fmt"
 	"sync"
-	"tcp/physicalinterface"
 )
 
 // to initially keep things simple, all hosts and gateways will have this single physical interface
@@ -13,12 +12,12 @@ const minMtuLength uint16 = 576 // currently, ensure is divisble by 8 (has to be
 
 type Module struct {
 	physicalInterfacesMutex sync.RWMutex
-	physicalInterfaces      map[string]*physicalinterface.PhysicalInterface
+	physicalInterfaces      map[string]*PhysicalInterface
 	mtuLength               uint16
 }
 
 func newModule() *Module {
-	module := Module{sync.RWMutex{}, make(map[string]*physicalinterface.PhysicalInterface), 576}
+	module := Module{sync.RWMutex{}, make(map[string]*PhysicalInterface), 576}
 	err := module.addPhysicalInterface(Eth0InterfaceName)
 	if err != nil {
 		panic("failed to add physical interface when creating a new module")
@@ -28,7 +27,7 @@ func newModule() *Module {
 }
 
 func ConnectModules(moduleA, moduleB *Module, interfaceA, interfaceB string) error {
-	connA, connB := physicalinterface.CreateMultiplexedConnection()
+	connA, connB := CreateMultiplexedConnection()
 	connected := make(chan struct{}, 2)
 
 	go func() {
@@ -59,7 +58,7 @@ func (module *Module) PassiveListen(interfaceName string) error {
 	return nil
 }
 
-func (module *Module) BindAddress(address physicalinterface.Address, interfaceName string) error {
+func (module *Module) BindAddress(address Address, interfaceName string) error {
 	module.physicalInterfacesMutex.RLock()
 	defer module.physicalInterfacesMutex.RUnlock()
 
@@ -71,7 +70,7 @@ func (module *Module) BindAddress(address physicalinterface.Address, interfaceNa
 	return fmt.Errorf("couldn't bind address to interface %s as it doesn't exist", interfaceName)
 }
 
-func (module *Module) UnbindAddress(address physicalinterface.Address, interfaceName string) error {
+func (module *Module) UnbindAddress(address Address, interfaceName string) error {
 	module.physicalInterfacesMutex.RLock()
 	defer module.physicalInterfacesMutex.RUnlock()
 
@@ -83,7 +82,7 @@ func (module *Module) UnbindAddress(address physicalinterface.Address, interface
 	return fmt.Errorf("couldn't bind address to interface %s as it doesn't exist", interfaceName)
 }
 
-func (module *Module) Send(data []byte, dstAddr physicalinterface.Address) (err error) {
+func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New("send channel closed")
@@ -94,7 +93,7 @@ func (module *Module) Send(data []byte, dstAddr physicalinterface.Address) (err 
 	physicalInterface := module.physicalInterfaces[Eth0InterfaceName]
 	module.physicalInterfacesMutex.RUnlock()
 
-	header := physicalinterface.Header{
+	header := Header{
 		DestinationAddress:     dstAddr,
 		VersionAndIHL:          0b00000101,
 		TotalLength:            0b0101 + uint16(len(data)),
@@ -102,7 +101,7 @@ func (module *Module) Send(data []byte, dstAddr physicalinterface.Address) (err 
 	}
 	header.SetMayFragment(true)
 
-	datagram := physicalinterface.Datagram{Header: header, Data: data}
+	datagram := Datagram{Header: header, Data: data}
 	datagrams, err := module.fragment(&datagram)
 
 	if err != nil {
@@ -125,12 +124,12 @@ func (module *Module) Send(data []byte, dstAddr physicalinterface.Address) (err 
 // max allowed data bytes are extracted; calculated by taking the MTU of the datagram then
 // subtracting how much space the header will take (as per the IHL field).  The NFB is calculated
 // from the number of 8-byte (byte not bit) blocks in the datagram's underlying data.
-func (module *Module) fragment(datagram *physicalinterface.Datagram) ([]*physicalinterface.Datagram, error) {
+func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 	if module.mtuLength < minMtuLength {
 		return nil, fmt.Errorf("module MTU (%d) below allowed value (%d) ", module.mtuLength, minMtuLength)
 	}
 	if datagram.Header.TotalLength <= module.mtuLength {
-		return []*physicalinterface.Datagram{datagram}, nil
+		return []*Datagram{datagram}, nil
 	}
 
 	if !datagram.Header.MayFragment() {
@@ -146,7 +145,7 @@ func (module *Module) fragment(datagram *physicalinterface.Datagram) ([]*physica
 
 	totalDataLength := datagram.Header.TotalLength - headerLength
 	numOfFullSizedFrags := totalDataLength / dataMtuLength
-	fragments := make([]*physicalinterface.Datagram, 0, numOfFullSizedFrags+1)
+	fragments := make([]*Datagram, 0, numOfFullSizedFrags+1)
 	byteDataOffset := uint16(0)
 
 	for i := 0; i < int(numOfFullSizedFrags); i++ {
@@ -161,7 +160,7 @@ func (module *Module) fragment(datagram *physicalinterface.Datagram) ([]*physica
 		fragmentHeader.HeaderChecksum = uint16(fragmentHeader.GetChecksum())
 
 		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+dataMtuLength]
-		fragment := &physicalinterface.Datagram{Header: fragmentHeader, Data: fragmentData}
+		fragment := &Datagram{Header: fragmentHeader, Data: fragmentData}
 		fragments = append(fragments, fragment)
 
 		byteDataOffset += dataMtuLength
@@ -181,7 +180,7 @@ func (module *Module) fragment(datagram *physicalinterface.Datagram) ([]*physica
 		fragmentHeader.HeaderChecksum = fragmentHeader.GetChecksum()
 
 		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+remainingDataLength]
-		fragment := &physicalinterface.Datagram{Header: fragmentHeader, Data: fragmentData}
+		fragment := &Datagram{Header: fragmentHeader, Data: fragmentData}
 		fragments = append(fragments, fragment)
 	} else {
 		fragments[len(fragments)-1].Header.SetMoreFragments(false)
@@ -210,13 +209,13 @@ func (module *Module) addPhysicalInterface(name string) error {
 		return fmt.Errorf("interface %s already exists", name)
 	}
 
-	physicalInterface := physicalinterface.NewPhysicalInterface()
+	physicalInterface := NewPhysicalInterface()
 	module.physicalInterfaces[name] = physicalInterface
 
 	return nil
 }
 
-func (module *Module) setInterfaceConnection(interfaceName string, conn *physicalinterface.Connection) error {
+func (module *Module) setInterfaceConnection(interfaceName string, conn *Connection) error {
 	module.physicalInterfacesMutex.RLock()
 	defer module.physicalInterfacesMutex.RUnlock()
 
@@ -227,24 +226,4 @@ func (module *Module) setInterfaceConnection(interfaceName string, conn *physica
 	physicalInterface.SetConnection(conn)
 
 	return nil
-}
-
-// The IP module for a host
-type Host struct {
-	*Module
-}
-
-func NewHost() *Host {
-	return &Host{Module: newModule()}
-}
-
-// The IP module for a gateway
-type Gateway struct {
-	*Module
-}
-
-func NewGateway() *Gateway {
-	return &Gateway{
-		Module: newModule(),
-	}
 }

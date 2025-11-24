@@ -1,24 +1,21 @@
 package main
 
-import (
-	"tcp/module"
-	"tcp/physicalinterface"
-)
+import "tcp/ipv4"
 
 func main() {
-	defaultInterface := module.Eth0InterfaceName
+	defaultInterface := ipv4.Eth0InterfaceName
 
-	host := module.NewHost()
-	hostAddress := physicalinterface.Address(333)
+	host := ipv4.NewHost()
+	hostAddress := ipv4.Address(333)
 	host.BindAddress(hostAddress, defaultInterface)
 	host.PassiveListen(defaultInterface)
 	defer host.Stop()
 
-	gateway := module.NewGateway()
+	gateway := ipv4.NewGateway()
 	gateway.PassiveListen(defaultInterface)
 	defer gateway.Stop()
 
-	module.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
+	ipv4.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
+	gateway.Send([]byte("aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111a"), hostAddress)
 	gateway.Send([]byte("hello"), hostAddress)
-	gateway.Send(make([]byte, 572), hostAddress)
 }
