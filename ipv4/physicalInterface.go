@@ -7,18 +7,20 @@ import (
 
 type PhysicalInterface struct {
 	Conn                     *Connection
+	OnDatagramReceived       func(*Datagram)
 	addresses                map[Address]struct{}
 	addressesMutex           sync.RWMutex
 	listenerGoroutinesWg     chan *sync.WaitGroup
 	listenerGoroutinesActive bool
 }
 
-func NewPhysicalInterface() *PhysicalInterface {
+func NewPhysicalInterface(datagramHandler func(*Datagram)) *PhysicalInterface {
 	listenerGoroutinesWg := make(chan *sync.WaitGroup, 1)
 	listenerGoroutinesWg <- &sync.WaitGroup{}
 
 	physicalInterface := &PhysicalInterface{
 		Conn:                 NewSentinelConnection(),
+		OnDatagramReceived:   datagramHandler,
 		addresses:            make(map[Address]struct{}, 4),
 		listenerGoroutinesWg: listenerGoroutinesWg,
 	}
@@ -103,9 +105,11 @@ func (pi *PhysicalInterface) handleDatagram(datagram *Datagram) {
 	pi.addressesMutex.RLock()
 	defer pi.addressesMutex.RUnlock()
 
+	fmt.Println("physical interface received datagram")
 	if _, exists := pi.addresses[datagram.Header.DestinationAddress]; exists {
-		fmt.Println("received datagram: ", datagram)
+		fmt.Println("physical interface forwarding datagram to module")
+		pi.OnDatagramReceived(datagram)
 	} else {
-		fmt.Println("rejected datagram: ", datagram)
+		fmt.Println("physical interface rejected datagram")
 	}
 }

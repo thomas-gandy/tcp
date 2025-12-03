@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // to initially keep things simple, all hosts and gateways will have this single physical interface
@@ -14,10 +15,17 @@ type Module struct {
 	physicalInterfacesMutex sync.RWMutex
 	physicalInterfaces      map[string]*PhysicalInterface
 	mtuLength               uint16
+	fragmentBuffers         map[FragmentBufferId]*FragmentBuffer
 }
 
 func newModule() *Module {
-	module := Module{sync.RWMutex{}, make(map[string]*PhysicalInterface), 576}
+	module := Module{
+		physicalInterfacesMutex: sync.RWMutex{},
+		physicalInterfaces:      make(map[string]*PhysicalInterface),
+		mtuLength:               576,
+		fragmentBuffers:         make(map[FragmentBufferId]*FragmentBuffer),
+	}
+
 	err := module.addPhysicalInterface(Eth0InterfaceName)
 	if err != nil {
 		panic("failed to add physical interface when creating a new module")
@@ -95,9 +103,8 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 
 	header := Header{
 		DestinationAddress:     dstAddr,
-		VersionAndIHL:          0b00000101,
-		TotalLength:            0b0101 + uint16(len(data)),
-		FlagsAndFragmentOffset: 0b1111_1111_1111_1111,
+		VersionAndIHLFourBytes: 0b00000101,
+		TotalLengthBytes:       0b0101 + uint16(len(data)),
 	}
 	header.SetMayFragment(true)
 
@@ -119,6 +126,14 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 	return nil
 }
 
+func (module *Module) Receive(datagram *Datagram) {
+	fmt.Println("module has received the datagram")
+	reassembledDatagram, err := module.reassemble(datagram)
+	if reassembledDatagram != nil && err == nil {
+		fmt.Println("module has reassembled datagram to: ", reassembledDatagram)
+	}
+}
+
 // Will fragment a datagram if the May Fragment flag is set.  If the total length of the datagram
 // (as per the total length field) is <= mtu, it will be returned without fragmentation.  Else, the
 // max allowed data bytes are extracted; calculated by taking the MTU of the datagram then
@@ -128,7 +143,7 @@ func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 	if module.mtuLength < minMtuLength {
 		return nil, fmt.Errorf("module MTU (%d) below allowed value (%d) ", module.mtuLength, minMtuLength)
 	}
-	if datagram.Header.TotalLength <= module.mtuLength {
+	if datagram.Header.TotalLengthBytes <= module.mtuLength {
 		return []*Datagram{datagram}, nil
 	}
 
@@ -136,34 +151,35 @@ func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 		return nil, errors.New("need to fragment datagram but May Fragment flag not enabled")
 	}
 
-	headerLength := uint16(datagram.Header.GetIHL()) * 4
+	headerLength := datagram.Header.GetIHLInBytes()
 	// ensure *data* in each full fragment is a multiple of 8-bytes
-	dataMtuLength := module.mtuLength - headerLength - module.mtuLength%8
-	if dataMtuLength <= 0 {
+	dataMtuLength := module.mtuLength - headerLength
+	boundedDataMtuLength := dataMtuLength - (dataMtuLength % 8)
+	if boundedDataMtuLength <= 0 {
 		return nil, fmt.Errorf("MTU is too small and header too large to allow data to be sent")
 	}
 
-	totalDataLength := datagram.Header.TotalLength - headerLength
-	numOfFullSizedFrags := totalDataLength / dataMtuLength
+	totalDataLength := datagram.Header.TotalLengthBytes - headerLength
+	numOfFullSizedFrags := totalDataLength / boundedDataMtuLength
 	fragments := make([]*Datagram, 0, numOfFullSizedFrags+1)
 	byteDataOffset := uint16(0)
 
-	for i := 0; i < int(numOfFullSizedFrags); i++ {
+	for i := range numOfFullSizedFrags {
 		fragmentHeader := datagram.Header
 		fragmentHeader.Identification = 0x00000000000000000000000000000000000000000
 		fragmentHeader.SetMoreFragments(true)
-		fragmentHeader.SetFragmentOffset(uint16(i * int(dataMtuLength) >> 3))
+		fragmentHeader.SetFragmentOffset(i * boundedDataMtuLength >> 3)
 		fragmentHeader.Options = fragmentHeader.GetFragmentCopyableOptionData()
 
 		fragmentHeader.SetIHL(5 + uint8(len(fragmentHeader.Options)>>2))
-		fragmentHeader.TotalLength = module.mtuLength
-		fragmentHeader.HeaderChecksum = uint16(fragmentHeader.GetChecksum())
+		fragmentHeader.TotalLengthBytes = boundedDataMtuLength + fragmentHeader.GetIHLInBytes()
+		fragmentHeader.HeaderChecksum = fragmentHeader.GetChecksum()
 
-		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+dataMtuLength]
+		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+boundedDataMtuLength]
 		fragment := &Datagram{Header: fragmentHeader, Data: fragmentData}
 		fragments = append(fragments, fragment)
 
-		byteDataOffset += dataMtuLength
+		byteDataOffset += boundedDataMtuLength
 	}
 
 	if byteDataOffset < totalDataLength {
@@ -172,11 +188,11 @@ func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 		fragmentHeader := datagram.Header
 		fragmentHeader.Identification = 0x00000000000000000000000000000000000000000
 		fragmentHeader.SetMoreFragments(false)
-		fragmentHeader.SetFragmentOffset(numOfFullSizedFrags * dataMtuLength >> 3)
+		fragmentHeader.SetFragmentOffset(numOfFullSizedFrags * boundedDataMtuLength >> 3)
 		fragmentHeader.Options = fragmentHeader.GetFragmentCopyableOptionData()
 
 		fragmentHeader.SetIHL(5 + uint8(len(fragmentHeader.Options)>>2))
-		fragmentHeader.TotalLength = fragmentHeader.GetIHLInBytes() + remainingDataLength
+		fragmentHeader.TotalLengthBytes = fragmentHeader.GetIHLInBytes() + remainingDataLength
 		fragmentHeader.HeaderChecksum = fragmentHeader.GetChecksum()
 
 		fragmentData := datagram.Data[byteDataOffset : byteDataOffset+remainingDataLength]
@@ -187,6 +203,32 @@ func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 	}
 
 	return fragments, nil
+}
+
+// If this fragment does not complete the datagram but is successfully inserted into the fragment
+// buffer, (nil, nil) will be returned.  If the fragment does complete the datagram, the complete
+// datagram will be returned.
+func (module *Module) reassemble(fragment *Datagram) (*Datagram, error) {
+	header := fragment.Header
+	fragmentBufferId := makeFragmentBufferId(&fragment.Header)
+
+	if !header.MoreFragments() && header.GetFragmentOffset() == 0 {
+		delete(module.fragmentBuffers, fragmentBufferId)
+		return fragment, nil
+	}
+
+	fragmentBuffer, exists := module.fragmentBuffers[fragmentBufferId]
+	if !exists {
+		fragmentBuffer = newFragmentBuffer()
+		fragmentBuffer.startUnixMs = time.Now().UnixMilli()
+		module.fragmentBuffers[fragmentBufferId] = fragmentBuffer
+	}
+	reassembledDatagram := fragmentBuffer.Insert(fragment)
+	if reassembledDatagram != nil {
+		delete(module.fragmentBuffers, fragmentBufferId)
+	}
+
+	return reassembledDatagram, nil
 }
 
 func (module *Module) Stop() {
@@ -209,7 +251,7 @@ func (module *Module) addPhysicalInterface(name string) error {
 		return fmt.Errorf("interface %s already exists", name)
 	}
 
-	physicalInterface := NewPhysicalInterface()
+	physicalInterface := NewPhysicalInterface(module.Receive)
 	module.physicalInterfaces[name] = physicalInterface
 
 	return nil

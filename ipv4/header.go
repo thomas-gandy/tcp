@@ -7,6 +7,7 @@ const (
 	fragmentOffsetBitMask                 = 0b0001_1111_1111_1111
 	FlagDontFragment               uint16 = 0b010 << fragmentOffsetBitLength
 	flagMoreFragments              uint16 = 0b001 << fragmentOffsetBitLength
+	totalLengthBitLength                  = 16
 	headerByteLengthWithoutOptions        = 20
 
 	HeaderOptionTypeCopiedFlagMask = 0b1000_0000
@@ -23,38 +24,42 @@ const (
 	HeaderOptionInternetTimestamp   = 0b0000_0000
 )
 
+// Useful to remember header order: VITT IFF TPH SDO
+// Something interesting to note is that only 13-bytes are available to the fragment offset, and
+// 16-bytes available to the total offset, but because a single unit of a fragment is measured in
+// terms of 8-bytes (2^3), it actually can specify an upper exclusive bound of 2^16.
 type Header struct {
-	VersionAndIHL          uint8 // version (4-bits) and IHL (4-bits)
-	TypeOfService          uint8
-	TotalLength            uint16
-	Identification         uint16
-	FlagsAndFragmentOffset uint16 // flags (3-bits) and fragment offset (13-bits)
-	TimeToLive             uint8
-	Protocol               uint8
-	HeaderChecksum         uint16
-	SourceAddress          uint32
-	DestinationAddress     uint32
-	Options                []uint8
+	VersionAndIHLFourBytes           uint8 // version (4-bits) and IHL (4-bits) (units of 4-bytes)
+	TypeOfService                    uint8
+	TotalLengthBytes                 uint16 // units of 1-byte
+	Identification                   uint16
+	FlagsAndFragmentOffsetEightBytes uint16 // flags (3-bits) and fragment offset (13-bits) (units of 8-bytes)
+	TimeToLiveSecs                   uint8
+	Protocol                         uint8
+	HeaderChecksum                   uint16
+	SourceAddress                    uint32
+	DestinationAddress               uint32
+	Options                          []uint8
 }
 
 func (h *Header) SetVersion(version uint8) {
-	h.VersionAndIHL |= version << 4
+	h.VersionAndIHLFourBytes |= version << 4
 }
 
 func (h *Header) SetIHL(dwords uint8) {
-	h.VersionAndIHL |= dwords
+	h.VersionAndIHLFourBytes |= dwords
 }
 
 func (h *Header) GetIHL() uint8 {
-	return h.VersionAndIHL & 0b0000_1111
+	return h.VersionAndIHLFourBytes & 0b0000_1111
 }
 
 func (h *Header) GetIHLInBytes() uint16 {
-	return uint16(h.VersionAndIHL&0b0000_1111) * 4
+	return uint16(h.VersionAndIHLFourBytes&0b0000_1111) * 4
 }
 
 func (h *Header) MayFragment() bool {
-	return h.FlagsAndFragmentOffset&FlagDontFragment == 0
+	return h.FlagsAndFragmentOffsetEightBytes&FlagDontFragment == 0
 }
 
 func (h *Header) SetMayFragment(allowFragmentation bool) {
@@ -62,7 +67,7 @@ func (h *Header) SetMayFragment(allowFragmentation bool) {
 }
 
 func (h *Header) MoreFragments() bool {
-	return h.FlagsAndFragmentOffset&flagMoreFragments == 1
+	return h.FlagsAndFragmentOffsetEightBytes&flagMoreFragments != 0
 }
 
 func (h *Header) SetMoreFragments(moreFragments bool) {
@@ -70,12 +75,12 @@ func (h *Header) SetMoreFragments(moreFragments bool) {
 }
 
 func (h *Header) SetFragmentOffset(offset uint16) {
-	h.FlagsAndFragmentOffset &^= fragmentOffsetBitMask
-	h.FlagsAndFragmentOffset |= offset & fragmentOffsetBitMask
+	h.FlagsAndFragmentOffsetEightBytes &^= fragmentOffsetBitMask
+	h.FlagsAndFragmentOffsetEightBytes |= offset & fragmentOffsetBitMask
 }
 
 func (h *Header) GetFragmentOffset() uint16 {
-	return h.FlagsAndFragmentOffset & fragmentOffsetBitMask
+	return h.FlagsAndFragmentOffsetEightBytes & fragmentOffsetBitMask
 }
 
 func (h *Header) GetChecksum() uint16 {
@@ -133,9 +138,9 @@ func (h *Header) GetFragmentCopyableOptionData() []uint8 {
 
 func (h *Header) setFlagState(flag uint16, enable bool) {
 	if enable {
-		h.FlagsAndFragmentOffset |= flag
+		h.FlagsAndFragmentOffsetEightBytes |= flag
 	} else {
-		h.FlagsAndFragmentOffset &^= flag
+		h.FlagsAndFragmentOffsetEightBytes &^= flag
 	}
 }
 
