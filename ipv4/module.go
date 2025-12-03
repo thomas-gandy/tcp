@@ -269,3 +269,21 @@ func (module *Module) setInterfaceConnection(interfaceName string, conn *Connect
 
 	return nil
 }
+
+type Host struct {
+	*Module
+}
+
+func NewHost() *Host {
+	return &Host{Module: newModule()}
+}
+
+type Gateway struct {
+	*Module
+}
+
+func NewGateway() *Gateway {
+	return &Gateway{
+		Module: newModule(),
+	}
+}
