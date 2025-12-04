@@ -1,6 +1,8 @@
 package main
 
-import "tcp/ipv4"
+import (
+	"tcp/ipv4"
+)
 
 func main() {
 	defaultInterface := ipv4.Eth0InterfaceName
@@ -16,6 +18,10 @@ func main() {
 	defer gateway.Stop()
 
 	ipv4.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
+
+	gateway.Send([]byte("abcd"), hostAddress)
 	gateway.Send([]byte("aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aaaaa11111aa"), hostAddress)
-	// gateway.Send([]byte("hello"), hostAddress)
+	for range 1 << 19 {
+		gateway.Send([]byte("hello"), hostAddress)
+	}
 }

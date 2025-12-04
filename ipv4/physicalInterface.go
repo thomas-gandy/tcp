@@ -1,7 +1,6 @@
 package ipv4
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -105,11 +104,8 @@ func (pi *PhysicalInterface) handleDatagram(datagram *Datagram) {
 	pi.addressesMutex.RLock()
 	defer pi.addressesMutex.RUnlock()
 
-	fmt.Println("physical interface received datagram")
 	if _, exists := pi.addresses[datagram.Header.DestinationAddress]; exists {
-		fmt.Println("physical interface forwarding datagram to module")
 		pi.OnDatagramReceived(datagram)
 	} else {
-		fmt.Println("physical interface rejected datagram")
 	}
 }

@@ -6,6 +6,7 @@ type FragmentBufferId struct {
 	identifier  uint16
 	source      uint32
 	destination uint32
+	protocol    uint8
 }
 
 func makeFragmentBufferId(header *Header) FragmentBufferId {
@@ -13,6 +14,7 @@ func makeFragmentBufferId(header *Header) FragmentBufferId {
 		identifier:  header.Identification,
 		source:      header.SourceAddress,
 		destination: header.DestinationAddress,
+		protocol:    header.Protocol,
 	}
 }
 
@@ -21,12 +23,12 @@ type FragmentBuffer struct {
 	dataBuffer            [1 << totalLengthBitLength]byte
 	fragmentBlockBitTable [(1 << (fragmentOffsetBitLength - 3)) + 1]byte
 	totalDataLength       uint16
-	startUnixMs           int64
+	startUnixSecs         int64
 }
 
 func newFragmentBuffer() *FragmentBuffer {
 	return &FragmentBuffer{
-		startUnixMs: time.Now().UnixMilli(),
+		startUnixSecs: time.Now().Unix(),
 	}
 }
 
