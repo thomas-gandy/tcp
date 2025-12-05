@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 )
 
 // to initially keep things simple, all hosts and gateways will have this single physical interface
@@ -103,22 +102,7 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 	physicalInterface := module.physicalInterfaces[Eth0InterfaceName]
 	module.physicalInterfacesMutex.RUnlock()
 
-	idPoolId := IdentifierPoolId{destinationAddress: dstAddr}
-	idPool, exists := module.identifierPools[idPoolId]
-	if !exists {
-		idPool = &IdentifierPool{}
-		module.identifierPools[idPoolId] = idPool
-	}
-	id := idPool.GetNextId()
-
-	header := Header{
-		VersionAndIHLFourBytes: 0b00000101,
-		Identification:         id,
-		TotalLengthBytes:       0b0101 + uint16(len(data)),
-		DestinationAddress:     dstAddr,
-	}
-	header.SetMayFragment(true)
-
+	header := module.createSendHeader(data, dstAddr)
 	datagram := Datagram{Header: header, Data: data}
 	datagrams, err := module.fragment(&datagram)
 
@@ -137,8 +121,32 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 	return nil
 }
 
+func (module *Module) createSendHeader(data []byte, dstAddr Address) Header {
+	header := Header{
+		VersionAndIHLFourBytes: 0b00000101,
+		Identification:         module.getIdentifierForDestination(dstAddr),
+		TotalLengthBytes:       0b0101 + uint16(len(data)),
+		TimeToLiveSecs:         255,
+		DestinationAddress:     dstAddr,
+	}
+	header.SetMayFragment(true)
+
+	return header
+}
+
+func (module *Module) getIdentifierForDestination(destination Address) uint16 {
+	idPoolId := IdentifierPoolId{destinationAddress: destination}
+	idPool, exists := module.identifierPools[idPoolId]
+	if !exists {
+		idPool = &IdentifierPool{}
+		module.identifierPools[idPoolId] = idPool
+	}
+
+	return idPool.GetNextId()
+}
+
 func (module *Module) Receive(datagram *Datagram) {
-	reassembledDatagram, err := module.reassemble(datagram)
+	reassembledDatagram, err := module.assemble(datagram)
 	assemblingOccurred := datagram != reassembledDatagram
 
 	if reassembledDatagram != nil && err == nil {
@@ -222,7 +230,7 @@ func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 // If this fragment does not complete the datagram but is successfully inserted into the fragment
 // buffer, (nil, nil) will be returned.  If the fragment does complete the datagram, the complete
 // datagram will be returned.
-func (module *Module) reassemble(fragment *Datagram) (*Datagram, error) {
+func (module *Module) assemble(fragment *Datagram) (*Datagram, error) {
 	header := fragment.Header
 	fragmentBufferId := makeFragmentBufferId(&fragment.Header)
 
@@ -232,11 +240,17 @@ func (module *Module) reassemble(fragment *Datagram) (*Datagram, error) {
 	}
 
 	fragmentBuffer, exists := module.fragmentBuffers[fragmentBufferId]
+	if exists {
+		if fragmentBuffer.timeHasExpired() {
+			delete(module.fragmentBuffers, fragmentBufferId)
+			exists = false
+		}
+	}
 	if !exists {
 		fragmentBuffer = newFragmentBuffer()
-		fragmentBuffer.startUnixSecs = time.Now().Unix()
 		module.fragmentBuffers[fragmentBufferId] = fragmentBuffer
 	}
+
 	reassembledDatagram := fragmentBuffer.Insert(fragment)
 	if reassembledDatagram != nil {
 		delete(module.fragmentBuffers, fragmentBufferId)

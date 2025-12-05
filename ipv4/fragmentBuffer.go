@@ -1,6 +1,10 @@
 package ipv4
 
-import "time"
+import (
+	"time"
+)
+
+const timeLowerBoundSecs = 15
 
 type FragmentBufferId struct {
 	identifier  uint16
@@ -24,11 +28,13 @@ type FragmentBuffer struct {
 	fragmentBlockBitTable [(1 << (fragmentOffsetBitLength - 3)) + 1]byte
 	totalDataLength       uint16
 	startUnixSecs         int64
+	startTimerSecs        uint8
 }
 
 func newFragmentBuffer() *FragmentBuffer {
 	return &FragmentBuffer{
-		startUnixSecs: time.Now().Unix(),
+		startUnixSecs:  time.Now().Unix(),
+		startTimerSecs: timeLowerBoundSecs,
 	}
 }
 
@@ -44,6 +50,7 @@ func (fb *FragmentBuffer) Insert(fragment *Datagram) *Datagram {
 
 	fb.insertFragmentIntoDataBuffer(fragment)
 	fb.setBlockBitsForFragment(fragment)
+	fb.updateTimer(header.TimeToLiveSecs)
 
 	if !header.MoreFragments() {
 		fb.totalDataLength = fragmentOffsetEightBytes*8 + header.TotalLengthBytes - header.GetIHLInBytes()
@@ -60,6 +67,26 @@ func (fb *FragmentBuffer) Insert(fragment *Datagram) *Datagram {
 	}
 
 	return nil
+}
+
+func (fb *FragmentBuffer) timeHasExpired() bool {
+	return fb.getTimerSecsRemaining() <= 0
+}
+
+func (fb *FragmentBuffer) updateTimer(ttl uint8) {
+	timerSecsRemaining := fb.getTimerSecsRemaining()
+
+	if int64(ttl) > timerSecsRemaining {
+		fb.startUnixSecs = time.Now().Unix()
+		fb.startTimerSecs = ttl
+	}
+}
+
+func (fb *FragmentBuffer) getTimerSecsRemaining() int64 {
+	endUnixSecs := fb.startUnixSecs + int64(fb.startTimerSecs)
+	timerSecsRemaining := endUnixSecs - time.Now().Unix()
+
+	return timerSecsRemaining
 }
 
 func (fb *FragmentBuffer) insertFragmentIntoDataBuffer(fragment *Datagram) {
