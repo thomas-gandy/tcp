@@ -9,6 +9,7 @@ import (
 // to initially keep things simple, all hosts and gateways will have this single physical interface
 const Eth0InterfaceName string = "eth0"
 const minMtuLength uint16 = 576 // currently, ensure is divisble by 8 (has to be for frag offset)
+const interfaceNotFoundMessage = "no interface with name %s exists"
 
 type Module struct {
 	physicalInterfacesMutex sync.RWMutex
@@ -16,6 +17,8 @@ type Module struct {
 	mtuLength               uint16
 	identifierPools         map[IdentifierPoolId]*IdentifierPool
 	fragmentBuffers         map[FragmentBufferId]*FragmentBuffer
+	routeTableMutex         sync.RWMutex
+	routeTable              map[Address]*PhysicalInterface
 }
 
 func newModule() *Module {
@@ -25,6 +28,8 @@ func newModule() *Module {
 		mtuLength:               576,
 		identifierPools:         make(map[IdentifierPoolId]*IdentifierPool),
 		fragmentBuffers:         make(map[FragmentBufferId]*FragmentBuffer),
+		routeTableMutex:         sync.RWMutex{},
+		routeTable:              make(map[Address]*PhysicalInterface),
 	}
 
 	err := module.addPhysicalInterface(Eth0InterfaceName)
@@ -54,13 +59,22 @@ func ConnectModules(moduleA, moduleB *Module, interfaceA, interfaceB string) err
 	return nil
 }
 
-func (module *Module) PassiveListen(interfaceName string) error {
-	module.physicalInterfacesMutex.RLock()
-	physicalInterface, exists := module.physicalInterfaces[interfaceName]
-	module.physicalInterfacesMutex.RUnlock()
+func (module *Module) AddToRouteTable(address Address, interfaceName string) error {
+	physicalInterface := module.getPhysicalInterface(interfaceName)
 
-	if !exists {
-		return fmt.Errorf("no interface with name %s exists", interfaceName)
+	if physicalInterface == nil {
+		return fmt.Errorf(interfaceNotFoundMessage, interfaceName)
+	}
+	module.routeTable[address] = physicalInterface
+
+	return nil
+}
+
+func (module *Module) PassiveListen(interfaceName string) error {
+	physicalInterface := module.getPhysicalInterface(interfaceName)
+
+	if physicalInterface == nil {
+		return fmt.Errorf(interfaceNotFoundMessage, interfaceName)
 	}
 
 	physicalInterface.Listen()
@@ -68,27 +82,24 @@ func (module *Module) PassiveListen(interfaceName string) error {
 }
 
 func (module *Module) BindAddress(address Address, interfaceName string) error {
-	module.physicalInterfacesMutex.RLock()
-	defer module.physicalInterfacesMutex.RUnlock()
-
-	if pi, exists := module.physicalInterfaces[interfaceName]; exists {
-		pi.BindAddress(address)
-		return nil
+	physicalInterface := module.getPhysicalInterface(interfaceName)
+	if physicalInterface == nil {
+		return fmt.Errorf(interfaceNotFoundMessage, interfaceName)
 	}
+	physicalInterface.BindAddress(address)
 
-	return fmt.Errorf("couldn't bind address to interface %s as it doesn't exist", interfaceName)
+	return nil
 }
 
 func (module *Module) UnbindAddress(address Address, interfaceName string) error {
-	module.physicalInterfacesMutex.RLock()
-	defer module.physicalInterfacesMutex.RUnlock()
+	physicalInterface := module.getPhysicalInterface(interfaceName)
 
-	if pi, exists := module.physicalInterfaces[interfaceName]; exists {
-		pi.UnbindAddress(address)
+	if physicalInterface != nil {
+		physicalInterface.UnbindAddress(address)
 		return nil
 	}
 
-	return fmt.Errorf("couldn't bind address to interface %s as it doesn't exist", interfaceName)
+	return fmt.Errorf(interfaceNotFoundMessage, interfaceName)
 }
 
 func (module *Module) Send(data []byte, dstAddr Address) (err error) {
@@ -98,9 +109,10 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 		}
 	}()
 
-	module.physicalInterfacesMutex.RLock()
-	physicalInterface := module.physicalInterfaces[Eth0InterfaceName]
-	module.physicalInterfacesMutex.RUnlock()
+	physicalInterface := module.routeTableLookup(dstAddr)
+	if physicalInterface == nil {
+		return errors.New("no direct route to destination")
+	}
 
 	header := module.createSendHeader(data, dstAddr)
 	datagram := Datagram{Header: header, Data: data}
@@ -110,15 +122,7 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 		return err
 	}
 
-	for _, d := range datagrams {
-		select {
-		case <-physicalInterface.Conn.Done:
-			return errors.New("connection is done")
-		case physicalInterface.Conn.Send <- *d:
-		}
-	}
-
-	return nil
+	return physicalInterface.Send(datagrams)
 }
 
 func (module *Module) createSendHeader(data []byte, dstAddr Address) Header {
@@ -128,10 +132,18 @@ func (module *Module) createSendHeader(data []byte, dstAddr Address) Header {
 		TotalLengthBytes:       0b0101 + uint16(len(data)),
 		TimeToLiveSecs:         255,
 		DestinationAddress:     dstAddr,
+		Options:                module.createOptions(),
 	}
 	header.SetMayFragment(true)
 
 	return header
+}
+
+func (module *Module) createOptions() []uint8 {
+	options := make([]uint8, 0, 8)
+	options = padToFourByteBoundary(options)
+
+	return options
 }
 
 func (module *Module) getIdentifierForDestination(destination Address) uint16 {
@@ -145,7 +157,7 @@ func (module *Module) getIdentifierForDestination(destination Address) uint16 {
 	return idPool.GetNextId()
 }
 
-func (module *Module) Receive(datagram *Datagram) {
+func (module *Module) Receive(datagram *Datagram, pi *PhysicalInterface) {
 	reassembledDatagram, err := module.assemble(datagram)
 	assemblingOccurred := datagram != reassembledDatagram
 
@@ -176,8 +188,8 @@ func (module *Module) fragment(datagram *Datagram) ([]*Datagram, error) {
 	}
 
 	headerLength := datagram.Header.GetIHLInBytes()
-	// ensure *data* in each full fragment is a multiple of 8-bytes
 	dataMtuLength := module.mtuLength - headerLength
+	// ensure *data* in each full fragment is a multiple of 8-bytes
 	boundedDataMtuLength := dataMtuLength - (dataMtuLength % 8)
 	if boundedDataMtuLength <= 0 {
 		return nil, fmt.Errorf("MTU is too small and header too large to allow data to be sent")
@@ -286,16 +298,27 @@ func (module *Module) addPhysicalInterface(name string) error {
 }
 
 func (module *Module) setInterfaceConnection(interfaceName string, conn *Connection) error {
-	module.physicalInterfacesMutex.RLock()
-	defer module.physicalInterfacesMutex.RUnlock()
-
-	physicalInterface, exists := module.physicalInterfaces[interfaceName]
-	if !exists {
+	physicalInterface := module.getPhysicalInterface(interfaceName)
+	if physicalInterface == nil {
 		return errors.New("interface doesn't exist")
 	}
 	physicalInterface.SetConnection(conn)
 
 	return nil
+}
+
+func (module *Module) getPhysicalInterface(name string) *PhysicalInterface {
+	module.physicalInterfacesMutex.RLock()
+	defer module.physicalInterfacesMutex.RUnlock()
+
+	return module.physicalInterfaces[name]
+}
+
+func (module *Module) routeTableLookup(address Address) *PhysicalInterface {
+	module.routeTableMutex.RLock()
+	defer module.routeTableMutex.RUnlock()
+
+	return module.routeTable[address]
 }
 
 type Host struct {

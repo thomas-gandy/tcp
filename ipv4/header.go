@@ -10,18 +10,18 @@ const (
 	totalLengthBitLength                  = 16
 	headerByteLengthWithoutOptions        = 20
 
-	HeaderOptionTypeCopiedFlagMask = 0b1000_0000
-	HeaderOptionTypeClassMask      = 0b0110_0000
-	HeaderOptionTypeNumberMask     = 0b0001_1111
+	MaskHeaderOptionCopiedFlag = 0b1000_0000
+	MaskHeaderOptionClass      = 0b0110_0000
+	MaskHeaderOptionNumber     = 0b0001_1111
 
-	HeaderOptionEndOfOptions        = 0b0000_0000
-	HeaderOptionNoOperation         = 0b0000_0000
-	HeaderOptionSecurity            = 0b0000_0000
-	HeaderOptionLooseSourceRouting  = 0b0000_0000
-	HeaderOptionStrictSourceRouting = 0b0000_0000
-	HeaderOptionRecordRoute         = 0b0000_0000
-	HeaderOptionStreamId            = 0b0000_0000
-	HeaderOptionInternetTimestamp   = 0b0000_0000
+	HeaderOptionTypeEndOfOptions        = 0b0000_0000
+	HeaderOptionTypeNoOperation         = 0b0000_0001
+	HeaderOptionTypeSecurity            = 0b1000_0010
+	HeaderOptionTypeLooseSourceRouting  = 0b1000_0011
+	HeaderOptionTypeStrictSourceRouting = 0b1000_1001
+	HeaderOptionTypeRecordRoute         = 0b0000_0111
+	HeaderOptionTypeStreamId            = 0b1000_1000
+	HeaderOptionTypeInternetTimestamp   = 0b0100_0100
 )
 
 // Useful to remember header order: VITT IFF TPH SDO
@@ -104,36 +104,39 @@ func (h *Header) GetChecksum() uint16 {
 }
 
 func (h *Header) GetFragmentCopyableOptionData() []uint8 {
-	ihlByteCount := h.GetIHLInBytes()
-	optionsCount := uint8(ihlByteCount - headerByteLengthWithoutOptions)
+	optionsCount := uint8(h.GetIHLInBytes() - headerByteLengthWithoutOptions)
 	if optionsCount == 0 {
 		return make([]uint8, 0)
 	}
 
-	optionTypeIndex := uint8(0)
-	result := make([]uint8, 0, optionsCount)
-	for optionTypeIndex < optionsCount {
-		optionType := h.Options[optionTypeIndex]
+	optionIndex := uint8(0)
+	resultOptions := make([]uint8, 0, optionsCount)
+	for optionIndex < optionsCount {
+		option := h.Options[optionIndex]
 
-		if optionType == 0 {
+		if option == 0 {
 			break
 		}
+		if option == 1 {
+			optionIndex++
+			continue
+		}
 
-		if optionType&HeaderOptionTypeCopiedFlagMask == 1 {
-			number := optionType & HeaderOptionTypeNumberMask
+		if option&MaskHeaderOptionCopiedFlag == 1 {
+			number := option & MaskHeaderOptionNumber
 
 			if number >= 2 {
-				optionLength := h.Options[optionTypeIndex+1]
-				result = append(result, h.Options[optionTypeIndex:optionLength]...)
-				optionTypeIndex += optionLength
+				optionLength := h.Options[optionIndex+1]
+				resultOptions = append(resultOptions, h.Options[optionIndex:optionLength]...)
+				optionIndex += optionLength
 			} else {
-				result = append(result, optionType)
-				optionTypeIndex++
+				resultOptions = append(resultOptions, option)
+				optionIndex++
 			}
 		}
 	}
 
-	return result
+	return padToFourByteBoundary(resultOptions)
 }
 
 func (h *Header) setFlagState(flag uint16, enable bool) {
@@ -142,6 +145,18 @@ func (h *Header) setFlagState(flag uint16, enable bool) {
 	} else {
 		h.FlagsAndFragmentOffsetEightBytes &^= flag
 	}
+}
+
+func padToFourByteBoundary(options []uint8) []uint8 {
+	remainder := len(options) % 4
+	if remainder > 0 {
+		paddingBytesNeeded := 4 - remainder
+		for range paddingBytesNeeded {
+			options = append(options, 0)
+		}
+	}
+
+	return options
 }
 
 func onesComplementSum(a, b uint16) uint16 {

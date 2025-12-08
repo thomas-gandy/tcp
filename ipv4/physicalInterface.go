@@ -1,19 +1,22 @@
 package ipv4
 
 import (
+	"errors"
 	"sync"
 )
 
+type DatagramHandler func(datagram *Datagram, pi *PhysicalInterface)
+
 type PhysicalInterface struct {
 	Conn                     *Connection
-	OnDatagramReceived       func(*Datagram)
+	OnDatagramReceived       DatagramHandler
 	addresses                map[Address]struct{}
 	addressesMutex           sync.RWMutex
 	listenerGoroutinesWg     chan *sync.WaitGroup
 	listenerGoroutinesActive bool
 }
 
-func NewPhysicalInterface(datagramHandler func(*Datagram)) *PhysicalInterface {
+func NewPhysicalInterface(datagramHandler DatagramHandler) *PhysicalInterface {
 	listenerGoroutinesWg := make(chan *sync.WaitGroup, 1)
 	listenerGoroutinesWg <- &sync.WaitGroup{}
 
@@ -40,6 +43,18 @@ func (pi *PhysicalInterface) SetConnection(newConnection *Connection) {
 	if pi.listenerGoroutinesActive {
 		pi.listen(wg)
 	}
+}
+
+func (pi *PhysicalInterface) Send(datagrams []*Datagram) error {
+	for _, d := range datagrams {
+		select {
+		case <-pi.Conn.Done:
+			return errors.New("connection is done")
+		case pi.Conn.Send <- *d:
+		}
+	}
+
+	return nil
 }
 
 func (pi *PhysicalInterface) Listen() {
@@ -105,7 +120,7 @@ func (pi *PhysicalInterface) handleDatagram(datagram *Datagram) {
 	defer pi.addressesMutex.RUnlock()
 
 	if _, exists := pi.addresses[datagram.Header.DestinationAddress]; exists {
-		pi.OnDatagramReceived(datagram)
+		pi.OnDatagramReceived(datagram, pi)
 	} else {
 	}
 }

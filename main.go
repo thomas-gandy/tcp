@@ -6,15 +6,19 @@ import (
 
 func main() {
 	defaultInterface := ipv4.Eth0InterfaceName
+	hostAddress := ipv4.Address(333)
+	gatewayAddress := ipv4.Address(334)
 
 	host := ipv4.NewHost()
-	hostAddress := ipv4.Address(333)
 	host.BindAddress(hostAddress, defaultInterface)
 	host.PassiveListen(defaultInterface)
+	host.AddToRouteTable(gatewayAddress, defaultInterface)
 	defer host.Stop()
 
 	gateway := ipv4.NewGateway()
+	gateway.BindAddress(gatewayAddress, defaultInterface)
 	gateway.PassiveListen(defaultInterface)
+	gateway.AddToRouteTable(hostAddress, defaultInterface)
 	defer gateway.Stop()
 
 	ipv4.ConnectModules(gateway.Module, host.Module, defaultInterface, defaultInterface)
