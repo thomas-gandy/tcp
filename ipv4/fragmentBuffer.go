@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-const timeLowerBoundSecs = 15
+const timeLowerBoundSecs = 150
 
 type FragmentBufferId struct {
 	identifier  uint16

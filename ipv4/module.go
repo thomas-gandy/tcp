@@ -21,7 +21,7 @@ type Module struct {
 	routeTable              map[Address]*PhysicalInterface
 }
 
-func newModule() *Module {
+func NewModule() *Module {
 	module := Module{
 		physicalInterfacesMutex: sync.RWMutex{},
 		physicalInterfaces:      make(map[string]*PhysicalInterface),
@@ -103,21 +103,41 @@ func (module *Module) UnbindAddress(address Address, interfaceName string) error
 }
 
 func (module *Module) Send(data []byte, dstAddr Address) (err error) {
+	header := module.createSendHeader(data, dstAddr)
+	datagram := Datagram{Header: header, Data: data}
+
+	return module.sendDatagram(&datagram)
+}
+
+func (module *Module) sendDatagram(datagram *Datagram) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New("send channel closed")
 		}
 	}()
 
-	physicalInterface := module.routeTableLookup(dstAddr)
+	if datagram.Header.TimeToLiveSecs == 0 {
+		return errors.New("datagram TTL exhausted")
+	}
+
+	headerOptionManager := MakeHeaderOptionManager(&datagram.Header)
+	if headerOptionManager.HasMultipleRouteOptions() {
+		return errors.New("multiple route options found") // as per per RFC 7126 §4.3
+	}
+
+	physicalInterface := module.routeTableLookup(datagram.Header.DestinationAddress)
 	if physicalInterface == nil {
+		// will come back to handle LSRR with routing later
 		return errors.New("no direct route to destination")
 	}
 
-	header := module.createSendHeader(data, dstAddr)
-	datagram := Datagram{Header: header, Data: data}
-	datagrams, err := module.fragment(&datagram)
+	physicalInterfaceAddress, err := physicalInterface.GetPrimaryAddress()
+	if err != nil {
+		return errors.New("no address bound to physical interface")
+	}
 
+	datagram.Header.SourceAddress = physicalInterfaceAddress
+	datagrams, err := module.fragment(datagram)
 	if err != nil {
 		return err
 	}
@@ -126,13 +146,17 @@ func (module *Module) Send(data []byte, dstAddr Address) (err error) {
 }
 
 func (module *Module) createSendHeader(data []byte, dstAddr Address) Header {
+	const headerByteLengthWithoutOptions = 20
+	options := module.createOptions()
+	ihl := uint8((headerByteLengthWithoutOptions + len(options)) >> 2)
+
 	header := Header{
-		VersionAndIHLFourBytes: 0b00000101,
+		VersionAndIHLFourBytes: ihl,
 		Identification:         module.getIdentifierForDestination(dstAddr),
-		TotalLengthBytes:       0b0101 + uint16(len(data)),
+		TotalLengthBytes:       uint16(ihl<<2) + uint16(len(data)),
 		TimeToLiveSecs:         255,
 		DestinationAddress:     dstAddr,
-		Options:                module.createOptions(),
+		Options:                options,
 	}
 	header.SetMayFragment(true)
 
@@ -140,10 +164,11 @@ func (module *Module) createSendHeader(data []byte, dstAddr Address) Header {
 }
 
 func (module *Module) createOptions() []uint8 {
-	options := make([]uint8, 0, 8)
-	options = padToFourByteBoundary(options)
+	optionsBuilder := OptionsBuilder{}
+	optionsBuilder.AddLooseSourceRoute([]Address{3})
+	optionsBuilder.AddRecordRoute(3)
 
-	return options
+	return optionsBuilder.Build()
 }
 
 func (module *Module) getIdentifierForDestination(destination Address) uint16 {
@@ -158,15 +183,30 @@ func (module *Module) getIdentifierForDestination(destination Address) uint16 {
 }
 
 func (module *Module) Receive(datagram *Datagram, pi *PhysicalInterface) {
-	reassembledDatagram, err := module.assemble(datagram)
-	assemblingOccurred := datagram != reassembledDatagram
+	datagram.Header.TimeToLiveSecs--
 
-	if reassembledDatagram != nil && err == nil {
-		text := "module has received a full datagram: "
-		if assemblingOccurred {
-			text = "module has reassembled datagram to: "
+	headerOptionManager := MakeHeaderOptionManager(&datagram.Header)
+	headerOptionManager.UpdateHeaderWithRecordRouteOption()
+
+	if pi.IsDestinationForAddress(datagram.Header.DestinationAddress) {
+		updated := headerOptionManager.UpdateHeaderWithSourceRouteOption()
+		if updated {
+			module.sendDatagram(datagram)
+			return
 		}
-		fmt.Println(text, reassembledDatagram)
+
+		reassembledDatagram, err := module.assemble(datagram)
+		assemblingOccurred := datagram != reassembledDatagram
+
+		if reassembledDatagram != nil && err == nil {
+			text := "module has received a full datagram: "
+			if assemblingOccurred {
+				text = "module has reassembled datagram to: "
+			}
+			fmt.Println(text, reassembledDatagram)
+		}
+	} else {
+		module.sendDatagram(datagram)
 	}
 }
 
@@ -326,7 +366,7 @@ type Host struct {
 }
 
 func NewHost() *Host {
-	return &Host{Module: newModule()}
+	return &Host{Module: NewModule()}
 }
 
 type Gateway struct {
@@ -335,6 +375,6 @@ type Gateway struct {
 
 func NewGateway() *Gateway {
 	return &Gateway{
-		Module: newModule(),
+		Module: NewModule(),
 	}
 }

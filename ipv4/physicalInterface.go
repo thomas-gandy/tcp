@@ -2,6 +2,8 @@ package ipv4
 
 import (
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -45,6 +47,18 @@ func (pi *PhysicalInterface) SetConnection(newConnection *Connection) {
 	}
 }
 
+func (pi *PhysicalInterface) GetPrimaryAddress() (Address, error) {
+	pi.addressesMutex.RLock()
+	defer pi.addressesMutex.RUnlock()
+
+	addresses := slices.Collect(maps.Keys(pi.addresses))
+	if len(addresses) == 0 {
+		return Address(0), errors.New("no primary address assigned to physical interface")
+	}
+
+	return addresses[0], nil
+}
+
 func (pi *PhysicalInterface) Send(datagrams []*Datagram) error {
 	for _, d := range datagrams {
 		select {
@@ -75,6 +89,14 @@ func (pi *PhysicalInterface) BindAddress(address Address) {
 	pi.addresses[address] = struct{}{}
 }
 
+func (pi *PhysicalInterface) IsDestinationForAddress(address Address) bool {
+	pi.addressesMutex.RLock()
+	defer pi.addressesMutex.RUnlock()
+	_, exists := pi.addresses[address]
+
+	return exists
+}
+
 func (pi *PhysicalInterface) UnbindAddress(address Address) {
 	pi.addressesMutex.Lock()
 	defer pi.addressesMutex.Unlock()
@@ -97,7 +119,7 @@ func (pi *PhysicalInterface) passiveListenDatagram() {
 	for {
 		select {
 		case datagram := <-pi.Conn.Receive:
-			pi.handleDatagram(&datagram)
+			pi.OnDatagramReceived(&datagram, pi)
 		case <-pi.Conn.Done:
 			return
 		}
@@ -113,14 +135,4 @@ func (pi *PhysicalInterface) listen(wg *sync.WaitGroup) {
 	wg.Go(pi.passiveListenDatagram)
 	wg.Go(pi.passiveListenConnectionDone)
 	pi.listenerGoroutinesActive = true
-}
-
-func (pi *PhysicalInterface) handleDatagram(datagram *Datagram) {
-	pi.addressesMutex.RLock()
-	defer pi.addressesMutex.RUnlock()
-
-	if _, exists := pi.addresses[datagram.Header.DestinationAddress]; exists {
-		pi.OnDatagramReceived(datagram, pi)
-	} else {
-	}
 }
